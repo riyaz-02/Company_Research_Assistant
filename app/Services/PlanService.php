@@ -97,27 +97,53 @@ class PlanService
     {
         $plan = $this->getOrCreatePlan($sessionId);
 
-        // Handle array sections
-        if (in_array($section, ['products', 'competitors', 'opportunities', 'recommendations', 'key_contacts'])) {
+        \Log::info('PlanService: Updating section', [
+            'session' => $sessionId,
+            'section' => $section,
+            'content_preview' => is_string($content) ? substr($content, 0, 100) : 'array'
+        ]);
+
+        // Check if this is a custom section (not in model attributes)
+        $modelAttributes = $plan->getAttributes();
+        $fillableFields = $plan->getFillable();
+        
+        // Step workflow sections are always strings (NOT arrays)
+        $stepWorkflowSections = [
+            'company_overview', 'financial_overview', 'products_services', 
+            'competitive_landscape', 'pain_points', 'recommendations', 'executive_summary'
+        ];
+        
+        // Legacy array sections (but not if they're step workflow sections)
+        $legacyArraySections = ['products', 'competitors', 'opportunities', 'key_contacts', 'business_pain_points', 'technical_pain_points'];
+        
+        // Handle array sections (but not step workflow sections)
+        if (!in_array($section, $stepWorkflowSections) && in_array($section, $legacyArraySections)) {
             if (is_array($content)) {
                 $plan->$section = $content;
             } else {
-                // If string provided, try to parse as JSON or create array
-                $decoded = json_decode($content, true);
-                $plan->$section = $decoded ?? [$content];
+                // If string provided, convert to array with the content
+                $plan->$section = [['content' => $content]];
             }
         } else {
-            // Handle string sections
+            // Handle string sections (including all step workflow sections)
             $plan->$section = is_string($content) ? $content : json_encode($content);
         }
 
-        // Store evidence if provided (could add evidence field to model if needed)
+        // Store evidence if provided
         if (!empty($evidence)) {
-            // For now, we'll store evidence in metadata or append to content
-            // You can extend the AccountPlan model to have an evidence field if needed
+            $sources = $plan->research_sources ?? [];
+            $sources[$section] = $evidence;
+            $plan->research_sources = $sources;
         }
+        
+        // Track last updated sections
+        $lastUpdated = $plan->last_updated_sections ?? [];
+        $lastUpdated[$section] = now()->toIso8601String();
+        $plan->last_updated_sections = $lastUpdated;
 
         $plan->save();
+        
+        \Log::info('PlanService: Section saved', ['section' => $section]);
 
         return $plan;
     }
@@ -135,11 +161,57 @@ class PlanService
     }
 
     /**
+     * Clear/reset plan for a session (useful when starting fresh research)
+     */
+    public function clearPlan(string $sessionId): void
+    {
+        $plan = AccountPlan::where('session_id', $sessionId)->first();
+        if ($plan) {
+            $plan->delete();
+            \Log::info('Cleared existing plan for session', ['session' => $sessionId]);
+        }
+    }
+
+    /**
      * Get plan by session ID
      */
     public function getPlan(string $sessionId): ?AccountPlan
     {
         return AccountPlan::where('session_id', $sessionId)->first();
+    }
+
+    /**
+     * Get step workflow sections (for 7-step conversational flow)
+     */
+    public function getStepSections(string $sessionId): array
+    {
+        $plan = $this->getPlan($sessionId);
+
+        if (!$plan) {
+            \Log::info('PlanService: No plan found for session', ['session' => $sessionId]);
+            return [];
+        }
+
+        $sections = [
+            'company_name' => $plan->company_name,
+            'company_overview' => $plan->company_overview ?? null,
+            'financial_overview' => $plan->financial_overview ?? null,
+            'products_services' => $plan->products_services ?? null,
+            'competitive_landscape' => $plan->competitive_landscape ?? null,
+            'pain_points' => $plan->pain_points ?? null,
+            'recommendations' => $plan->recommendations ?? null,
+            'executive_summary' => $plan->executive_summary ?? null,
+        ];
+
+        \Log::info('PlanService: getStepSections returning', [
+            'session' => $sessionId,
+            'company_name' => $sections['company_name'],
+            'sections_with_content' => array_keys(array_filter($sections, function($v) { 
+                return !is_null($v) && $v !== ''; 
+            }))
+        ]);
+
+        return $sections;
     }
 
     /**

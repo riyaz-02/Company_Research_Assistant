@@ -8,6 +8,7 @@ use App\Services\MemoryService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Cache;
 
 class AgentController extends Controller
 {
@@ -46,6 +47,10 @@ class AgentController extends Controller
 
             // Handle array responses (step-by-step mode)
             if (is_array($result) && isset($result[0]['type'])) {
+                // Check if it's a step workflow session
+                $state = Cache::get("agent_state_{$sessionId}");
+                $isStepWorkflow = $state && isset($state['mode']) && $state['mode'] === 'step_workflow';
+                
                 // Format responses for frontend
                 $formattedResponses = $this->formatResponses($result);
                 
@@ -53,7 +58,10 @@ class AgentController extends Controller
                     'success' => true,
                     'session_id' => $sessionId,
                     'responses' => $formattedResponses,
-                    'plan' => $this->planService->getPlanSections($sessionId),
+                    'plan' => $isStepWorkflow 
+                        ? $this->planService->getStepSections($sessionId)
+                        : $this->planService->getPlanSections($sessionId),
+                    'is_step_workflow' => $isStepWorkflow,
                 ]);
             }
 
@@ -148,11 +156,20 @@ class AgentController extends Controller
         ]);
 
         $sessionId = $request->input('session_id');
-        $plan = $this->planService->getPlanSections($sessionId);
+        
+        // Check if it's a step workflow session
+        $state = Cache::get("agent_state_{$sessionId}");
+        $isStepWorkflow = $state && isset($state['mode']) && $state['mode'] === 'step_workflow';
+        
+        // Use appropriate section getter
+        $plan = $isStepWorkflow 
+            ? $this->planService->getStepSections($sessionId)
+            : $this->planService->getPlanSections($sessionId);
 
         return response()->json([
             'success' => true,
             'plan' => $plan,
+            'is_step_workflow' => $isStepWorkflow,
         ]);
     }
 

@@ -637,6 +637,8 @@
         }
 
         function updatePlan(plan) {
+            console.log('updatePlan called with:', plan);
+            
             if (plan.company_name) {
                 companyNameEl.textContent = plan.company_name;
             }
@@ -647,22 +649,36 @@
                 return;
             }
 
+            // Step workflow sections (primary)
+            const stepSections = [
+                { key: 'company_overview', title: '1. Company Overview' },
+                { key: 'financial_overview', title: '2. Financial Overview' },
+                { key: 'products_services', title: '3. Products & Services' },
+                { key: 'competitive_landscape', title: '4. Competitive Landscape' },
+                { key: 'pain_points', title: '5. Pain Points & Challenges' },
+                { key: 'recommendations', title: '6. Strategic Recommendations' },
+                { key: 'executive_summary', title: '7. Executive Summary' },
+            ];
+            
             // Legacy plan structure for compatibility
-            const sections = [
+            const legacySections = [
                 { key: 'overview', title: 'Overview' },
-                { key: 'products', title: 'Products & Services' },
+                { key: 'products', title: 'Products' },
                 { key: 'competitors', title: 'Competitors' },
                 { key: 'opportunities', title: 'Opportunities' },
-                { key: 'recommendations', title: 'Recommendations' },
                 { key: 'market_position', title: 'Market Position' },
                 { key: 'financial_summary', title: 'Financial Summary' },
                 { key: 'key_contacts', title: 'Key Contacts' },
             ];
 
             let html = '';
-            sections.forEach(section => {
+            let hasContent = false;
+            
+            // Render step sections first
+            stepSections.forEach(section => {
                 const value = plan[section.key];
                 if (value && (typeof value === 'string' ? value.trim() : (Array.isArray(value) ? value.length > 0 : true))) {
+                    hasContent = true;
                     html += `
                         <div class=\"glass-lighter border border-white/10 rounded-2xl p-6 mb-4 backdrop-blur-xl shadow-xl hover:border-white/20 transition-all duration-300\">
                             <div class=\"flex justify-between items-center mb-3\">
@@ -674,15 +690,41 @@
                                     Regenerate
                                 </button>
                             </div>
-                            <div class=\"text-gray-200 leading-relaxed\">
+                            <div class=\"text-gray-200 leading-relaxed whitespace-pre-wrap\">
                                 ${formatSectionContent(value)}
                             </div>
                         </div>
                     `;
                 }
             });
+            
+            // Then legacy sections if no step content
+            if (!hasContent) {
+                legacySections.forEach(section => {
+                    const value = plan[section.key];
+                    if (value && (typeof value === 'string' ? value.trim() : (Array.isArray(value) ? value.length > 0 : true))) {
+                        hasContent = true;
+                        html += `
+                            <div class=\"glass-lighter border border-white/10 rounded-2xl p-6 mb-4 backdrop-blur-xl shadow-xl hover:border-white/20 transition-all duration-300\">
+                                <div class=\"flex justify-between items-center mb-3\">
+                                    <h3 class=\"font-semibold text-white text-lg\">${section.title}</h3>
+                                    <button 
+                                        onclick=\"regenerateSection('${section.key}')\" 
+                                        class=\"text-sm text-blue-400 hover:text-blue-300 glass-lighter px-3 py-1.5 rounded-xl border border-blue-400/30 hover:border-blue-300/50 transition-all duration-300\"
+                                    >
+                                        Regenerate
+                                    </button>
+                                </div>
+                                <div class=\"text-gray-200 leading-relaxed\">
+                                    ${formatSectionContent(value)}
+                                </div>
+                            </div>
+                        `;
+                    }
+                });
+            }
 
-            if (!html) {
+            if (!hasContent) {
                 html = '<div class="text-center text-gray-500 py-12"><p>Plan sections will appear here as they are generated</p></div>';
             }
 
@@ -1004,6 +1046,7 @@ ${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}
 
         // Add message with buttons
         function addMessageWithButtons(content, buttons, context = {}) {
+            console.log('addMessageWithButtons called:', { content, buttons, context });
             const messageDiv = document.createElement('div');
             messageDiv.className = 'chat-message';
             
@@ -1015,8 +1058,11 @@ ${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}
             bubble.innerHTML = `<p class="text-gray-100">${escapeHtml(content)}</p>`;
             
             if (buttons && buttons.length > 0) {
+                console.log('Creating button group with:', buttons);
                 const buttonGroup = createButtonGroup(buttons, context);
                 bubble.appendChild(buttonGroup);
+            } else {
+                console.log('No buttons to create');
             }
             
             messageContent.appendChild(bubble);
@@ -1047,9 +1093,31 @@ ${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}
         }
 
         // Update plan section
-        function updatePlanSection(section, content) {
-            console.log('Updating plan section:', section);
-            // This will be handled by existing updatePlan function
+        async function updatePlanSection(section, content) {
+            console.log('Updating plan section:', section, 'with content length:', content.length);
+            
+            // Fetch the latest plan to get all sections
+            try {
+                const response = await fetch(`/api/agent/plan?session_id=${sessionId}`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                    }
+                });
+                
+                const data = await response.json();
+                if (data.success && data.plan) {
+                    console.log('Fetched latest plan:', data.plan);
+                    updatePlan(data.plan);
+                } else {
+                    console.error('Failed to fetch plan:', data);
+                }
+            } catch (error) {
+                console.error('Error fetching plan:', error);
+                // Fallback: just log the update
+                console.log('Section update:', section, content);
+            }
         }
 
         async function generateFinalPlan() {

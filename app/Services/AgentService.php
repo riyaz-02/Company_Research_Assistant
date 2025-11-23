@@ -1368,11 +1368,33 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     
     private function isResearchRequest(string $message): bool
     {
-        $researchKeywords = ['research', 'analyze', 'account plan', 'company', 'investigate', 'explore'];
+        $researchKeywords = ['research', 'analyze', 'account plan', 'company', 'investigate', 'explore', 'create', 'generate'];
         $lowerMessage = strtolower($message);
         
+        // Check for explicit research keywords
         foreach ($researchKeywords as $keyword) {
             if (str_contains($lowerMessage, $keyword)) {
+                return true;
+            }
+        }
+        
+        // If message is short (1-5 words) and doesn't contain common conversational words
+        // treat it as a potential company name research request
+        $words = array_filter(explode(' ', trim($message)));
+        $conversationalWords = ['hello', 'hi', 'hey', 'thanks', 'thank', 'please', 'can', 'you', 'what', 'how', 'why', 'when', 'where', 'tell', 'me', 'about', 'the'];
+        
+        if (count($words) > 0 && count($words) <= 5) {
+            $hasConversational = false;
+            foreach ($words as $word) {
+                if (in_array(strtolower($word), $conversationalWords)) {
+                    $hasConversational = true;
+                    break;
+                }
+            }
+            
+            // If no conversational words and not too short, likely a company name
+            if (!$hasConversational && count($words) >= 1) {
+                Log::info('Detected potential company name as research request', ['message' => $message]);
                 return true;
             }
         }
@@ -1393,8 +1415,12 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             ]];
         }
         
+        // Clear any existing plan for this session to start fresh
+        $this->planService->clearPlan($sessionId);
+        
         // Initialize state
         $state = [
+            'mode' => 'step_workflow',
             'step_mode' => true,
             'current_step' => 'company_basics',
             'completed_steps' => [],
@@ -1404,7 +1430,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         ];
         $this->saveSessionState($sessionId, $state);
         
-        Log::info('Starting research for company', ['company' => $companyName]);
+        Log::info('Starting research for company', ['company' => $companyName, 'session' => $sessionId]);
         
         // Start first step
         $stepResponses = $this->performStep($sessionId, 'company_basics', $state);
@@ -1453,8 +1479,47 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             $searchQuery = str_replace('{company}', $state['company_name'], $stepConfig['search_query']);
             $searchResults = $this->researchService->search($searchQuery);
             
+            // Check if search results are sufficient
+            if (empty($searchResults) || count($searchResults) < 2) {
+                // Insufficient results - offer fallback
+                $state['step_data'][$stepName] = [
+                    'content' => 'Insufficient data found from initial search.'
+                ];
+                $this->saveSessionState($sessionId, $state);
+                
+                return [[
+                    'type' => 'ask_user',
+                    'content' => "No reliable data found for this step. Would you like me to try deeper research?",
+                    'buttons' => [
+                        ['text' => 'Deep Research', 'value' => 'deep research'],
+                        ['text' => 'Skip', 'value' => 'next step'],
+                        ['text' => 'Stop', 'value' => 'stop']
+                    ]
+                ]];
+            }
+            
             // Extract and format data
             $data = $this->extractStepData($searchResults, $stepName);
+            
+            // Verify data was extracted
+            if (empty($data) || (isset($data['content']) && empty(trim($data['content'])))) {
+                // Data extraction failed - offer fallback
+                $state['step_data'][$stepName] = [
+                    'content' => 'Unable to extract meaningful data from search results.'
+                ];
+                $this->saveSessionState($sessionId, $state);
+                
+                return [[
+                    'type' => 'ask_user',
+                    'content' => "Data extraction incomplete. Would you like to try deeper research?",
+                    'buttons' => [
+                        ['text' => 'Deep Research', 'value' => 'deep research'],
+                        ['text' => 'Skip', 'value' => 'next step'],
+                        ['text' => 'Stop', 'value' => 'stop']
+                    ]
+                ]];
+            }
+            
             $state['step_data'][$stepName] = $data;
         } else {
             // Use Gemini for analysis
@@ -1539,7 +1604,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'message' => 'Performing deep research...'
             ], ...$this->performDeepResearch($sessionId, $currentStep, $state)];
             
-        } elseif ($decision === 'next step') {
+        } elseif ($decision === 'next step' || $decision === 'skip') {
             // Skip to next step
             $state['completed_steps'][] = $currentStep;
             $nextStep = $this->getNextStep($currentStep);
@@ -1562,6 +1627,16 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'type' => 'progress',
                 'message' => "Step {$stepNum}/7: " . $this->getStepConfig($nextStep)['progress_message']
             ], ...$this->performStep($sessionId, $nextStep, $state)];
+            
+        } elseif ($decision === 'stop') {
+            // User wants to stop research
+            $state['step_mode'] = false;
+            $this->saveSessionState($sessionId, $state);
+            
+            return [[
+                'type' => 'message',
+                'content' => "Research stopped. You can review the data collected so far in the Account Plan section."
+            ]];
         }
         
         return [[
@@ -1609,7 +1684,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'section' => 'pain_points',
                 'use_search' => false,
                 'search_query' => '',
-                'prompt' => 'Based on the research data for {company}, identify key pain points, challenges, and opportunities.',
+                'prompt' => 'Based on all the research data gathered for {company}, identify and synthesize key pain points, challenges, and business/technical obstacles.\n\nInstructions:\n- Analyze the company\'s financial situation, products, competitive position\n- Identify 3-5 main pain points or challenges\n- Be specific and actionable\n- Use bullet points for clarity\n- Maximum 250 words\n- Do not speculate; base insights on provided data',
                 'progress_message' => 'Analyzing pain points...',
                 'confirmation_message' => 'Pain points identified. Should I generate recommendations?'
             ],
@@ -1617,7 +1692,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'section' => 'recommendations',
                 'use_search' => false,
                 'search_query' => '',
-                'prompt' => 'Generate strategic recommendations for engaging {company} based on all research data.',
+                'prompt' => 'Generate strategic recommendations for engaging {company} based on all research data.\n\nInstructions:\n- Provide 4-6 actionable recommendations\n- Base recommendations on identified pain points and competitive landscape\n- Be specific about potential solutions or engagement strategies\n- Use bullet points for each recommendation\n- Maximum 300 words\n- Focus on value proposition and strategic fit',
                 'progress_message' => 'Generating recommendations...',
                 'confirmation_message' => 'Recommendations ready. Create the final account plan?'
             ],
@@ -1625,7 +1700,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'section' => 'executive_summary',
                 'use_search' => false,
                 'search_query' => '',
-                'prompt' => 'Create executive summary and final account plan for {company}.',
+                'prompt' => 'Create a comprehensive executive summary that synthesizes all research for {company}.\n\nInstructions:\n- Summarize company overview, financial health, products, and competitive position\n- Highlight key pain points and opportunities\n- Conclude with top 3 strategic recommendations\n- Use clear structure with headings\n- Maximum 400 words\n- Professional, concise, actionable tone',
                 'progress_message' => 'Creating final account plan...',
                 'confirmation_message' => 'Final account plan complete!'
             ]
@@ -1648,16 +1723,114 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     
     private function extractStepData(array $searchResults, string $stepName): array
     {
-        // Use existing extractCompanyInfoFromResults method
-        $query = match($stepName) {
-            'company_basics' => 'company overview headquarters employees',
-            'financial' => 'revenue funding valuation',
-            'products_tech' => 'products services technology',
-            'competitors' => 'competitors alternatives',
-            default => 'information'
-        };
+        Log::info('extractStepData called', [
+            'step' => $stepName,
+            'result_count' => count($searchResults)
+        ]);
         
-        return $this->extractCompanyInfoFromResults($searchResults, $query);
+        if (empty($searchResults)) {
+            Log::warning('No search results provided');
+            return [];
+        }
+        
+        // Extract evidence items with proper structure
+        $evidence = [];
+        foreach (array_slice($searchResults, 0, 3) as $result) {
+            // Check for both 'link' and 'url' since different sources use different keys
+            $url = $result['link'] ?? $result['url'] ?? null;
+            $snippet = $result['snippet'] ?? null;
+            
+            if ($snippet && $url) {
+                $evidence[] = [
+                    'source' => $result['title'] ?? parse_url($url, PHP_URL_HOST),
+                    'url' => $url,
+                    'snippet' => trim($snippet)
+                ];
+            }
+        }
+        
+        Log::info('Evidence extracted', [
+            'evidence_count' => count($evidence)
+        ]);
+        
+        if (empty($evidence)) {
+            Log::warning('No evidence could be extracted from search results');
+            return [];
+        }
+        
+        // Collect raw data for synthesis
+        $rawData = implode("\n\n", array_column($evidence, 'snippet'));
+        
+        Log::info('Calling synthesizeWithGemini', [
+            'step' => $stepName,
+            'raw_data_length' => strlen($rawData)
+        ]);
+        
+        // Use Gemini to synthesize the raw search results into clean content
+        $synthesisPrompt = $this->getSynthesisPromptForStep($stepName);
+        $synthesizedContent = $this->synthesizeWithGemini($synthesisPrompt, $rawData);
+        
+        // Check if synthesis was successful (detect error messages)
+        $isError = empty(trim($synthesizedContent)) || 
+                   str_contains($synthesizedContent, 'Unable to synthesize') ||
+                   str_contains($synthesizedContent, 'Analysis temporarily unavailable') ||
+                   str_contains($synthesizedContent, 'API Status: 429');
+        
+        if ($isError) {
+            Log::warning('Synthesis failed, using raw data fallback', [
+                'content_preview' => substr($synthesizedContent, 0, 100)
+            ]);
+            
+            // Format raw evidence into professional readable text
+            $formattedContent = "";
+            foreach ($evidence as $idx => $item) {
+                if ($idx > 0) $formattedContent .= "\n\n";
+                $formattedContent .= "• " . trim($item['snippet']);
+            }
+            
+            return [
+                'content' => $formattedContent,
+                'evidence' => $evidence
+            ];
+        }
+        
+        return [
+            'content' => $synthesizedContent,
+            'evidence' => $evidence
+        ];
+    }
+    
+    private function getSynthesisPromptForStep(string $stepName): string
+    {
+        return match($stepName) {
+            'company_basics' => 
+                "Synthesize the following search results into a clean, concise company overview.\n" .
+                "Include: headquarters location, industry, employee count, founding year, and brief description.\n" .
+                "Remove duplicate information. Use bullet points for key facts. Maximum 200 words.\n" .
+                "Do not paste raw snippets. Summarize factually.",
+            
+            'financial' => 
+                "Synthesize the following financial data into a clear financial overview.\n" .
+                "Include: revenue figures, growth rates, funding rounds, valuation, investors.\n" .
+                "Use bullet points for key metrics. Remove duplicate numbers. Maximum 200 words.\n" .
+                "Format currency consistently. Do not paste raw snippets.",
+            
+            'products_tech' => 
+                "Synthesize the following information into a products and services overview.\n" .
+                "Include: main product lines, key services, technology stack, target customers.\n" .
+                "Group related products together. Use bullet points. Maximum 200 words.\n" .
+                "Remove repetitive content. Summarize concisely.",
+            
+            'competitors' => 
+                "Synthesize the following into a competitive landscape analysis.\n" .
+                "List main competitors with brief descriptions. Identify market positioning.\n" .
+                "Use bullet points for each competitor. Maximum 200 words.\n" .
+                "Remove duplicate mentions. Be factual and concise.",
+            
+            default => 
+                "Summarize the following information concisely.\n" .
+                "Remove duplicate content. Use clear structure. Maximum 200 words."
+        };
     }
     
     private function buildContextForStep(array $state): string
@@ -1673,43 +1846,160 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         return $context;
     }
     
-    private function analyzeWithGemini(string $prompt, string $context): array
+    private function synthesizeWithGemini(string $instruction, string $rawData): string
     {
-        $fullPrompt = "{$prompt}\n\nContext:\n{$context}";
-        
-        $response = Http::timeout(60)->post($this->llmEndpoint, [
-            'contents' => [
-                [
-                    'parts' => [
-                        ['text' => $fullPrompt]
-                    ]
-                ]
-            ],
-            'generationConfig' => [
-                'temperature' => 0.7,
-                'maxOutputTokens' => 2048
-            ]
+        Log::info('synthesizeWithGemini called', [
+            'instruction_length' => strlen($instruction),
+            'raw_data_length' => strlen($rawData)
         ]);
         
-        if ($response->successful()) {
-            $result = $response->json();
-            $text = $result['candidates'][0]['content']['parts'][0]['text'] ?? '';
-            
+        if (empty(trim($rawData))) {
+            Log::warning('Empty raw data provided to synthesis');
+            return 'No data available to synthesize.';
+        }
+        
+        $fullPrompt = "{$instruction}\n\nRaw Data:\n{$rawData}\n\nProvide synthesized output as plain text.";
+        
+        $result = $this->callGeminiWithRetry($fullPrompt);
+        
+        Log::info('Synthesis result', [
+            'success' => !empty($result['content']),
+            'content_length' => isset($result['content']) ? strlen($result['content']) : 0
+        ]);
+        
+        return $result['content'] ?? 'Unable to synthesize data at this time.';
+    }
+    
+    private function analyzeWithGemini(string $prompt, string $context): array
+    {
+        $fullPrompt = "{$prompt}\n\nContext:\n{$context}\n\nProvide a detailed analysis in plain text format.";
+        
+        // Construct Gemini endpoint if not set
+        $endpoint = $this->llmEndpoint;
+        if (empty($endpoint) && $this->llmProvider === 'gemini') {
+            $apiKey = $this->llmApiKey ?: env('GEMINI_API_KEY');
+            $model = 'gemini-2.0-flash-exp';
+            $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+        }
+        
+        $result = $this->callGeminiWithRetry($fullPrompt);
+        return $result;
+    }
+    
+    private function callGeminiWithRetry(string $prompt, int $maxRetries = 3, int $initialDelay = 5): array
+    {
+        // Construct Gemini endpoint
+        $endpoint = $this->llmEndpoint;
+        if (empty($endpoint) && $this->llmProvider === 'gemini') {
+            $apiKey = $this->llmApiKey ?: env('GEMINI_API_KEY');
+            $model = 'gemini-2.0-flash-exp';
+            $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+        }
+        
+        if (empty($endpoint)) {
+            Log::error('Gemini endpoint not configured');
             return [
-                'content' => $text,
+                'content' => 'AI analysis unavailable - API endpoint not configured.',
                 'sources' => ['AI Analysis']
             ];
         }
         
-        return [
-            'content' => 'Analysis unavailable',
-            'sources' => []
-        ];
+        Log::info('Calling Gemini with retry capability', [
+            'prompt_length' => strlen($prompt),
+            'max_retries' => $maxRetries
+        ]);
+        
+        try {
+            $retryDelay = $initialDelay;
+            
+            for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+                $response = Http::timeout(60)->post($endpoint, [
+                    'contents' => [
+                        [
+                            'parts' => [
+                                ['text' => $prompt]
+                            ]
+                        ]
+                    ],
+                    'generationConfig' => [
+                        'temperature' => 0.7,
+                        'maxOutputTokens' => 2048
+                    ]
+                ]);
+                
+                if ($response->successful()) {
+                    $result = $response->json();
+                    $text = $result['candidates'][0]['content']['parts'][0]['text'] ?? '';
+                    
+                    Log::info('Gemini analysis response', [
+                        'attempt' => $attempt,
+                        'text_length' => strlen($text),
+                        'preview' => substr($text, 0, 200)
+                    ]);
+                    
+                    if (empty($text)) {
+                        Log::warning('Empty Gemini response', ['result' => $result]);
+                        return [
+                            'content' => 'Unable to generate analysis at this time. Please try again.',
+                            'sources' => ['AI Analysis']
+                        ];
+                    }
+                    
+                    return [
+                        'content' => $text,
+                        'sources' => ['AI Analysis']
+                    ];
+                }
+                
+                // Handle rate limiting with exponential backoff
+                if ($response->status() === 429 && $attempt < $maxRetries) {
+                    Log::warning("Gemini rate limit hit, retrying in {$retryDelay}s (attempt {$attempt}/{$maxRetries})");
+                    sleep($retryDelay);
+                    $retryDelay = min($retryDelay * 2, 15); // Exponential backoff, max 15s
+                    continue;
+                }
+                
+                // Other error - log and return message
+                Log::error('Gemini API error after retries', [
+                    'status' => $response->status(),
+                    'attempt' => $attempt,
+                    'body' => substr($response->body(), 0, 500)
+                ]);
+                break;
+            }
+            
+            // If we get here, all retries failed
+            return [
+                'content' => 'Analysis temporarily unavailable. Please try again in a moment. (API Status: ' . ($response->status() ?? 'unknown') . ')',
+                'sources' => ['AI Analysis']
+            ];
+        } catch (\Exception $e) {
+            Log::error('Gemini analysis exception', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            return [
+                'content' => 'Analysis error: ' . $e->getMessage(),
+                'sources' => ['AI Analysis']
+            ];
+        }
     }
     
     private function detectConflicts(array $data, string $stepName, array $state): array
     {
         $conflicts = [];
+        
+        // Skip conflict detection if current data has error messages
+        if (isset($data['content'])) {
+            $content = $data['content'];
+            if (str_contains($content, 'Analysis temporarily unavailable') ||
+                str_contains($content, 'Unable to extract') ||
+                str_contains($content, 'API Status: 429')) {
+                Log::info('Skipping conflict detection - current data has error message');
+                return [];
+            }
+        }
         
         // Compare numeric values (3% threshold)
         foreach ($data as $key => $value) {
@@ -1796,15 +2086,29 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     
     private function formatConflicts(array $conflicts): string
     {
-        $formatted = '';
+        $formatted = 'Found differing information:\n\n';
         
         foreach ($conflicts as $i => $conflict) {
-            $formatted .= ($i + 1) . ". {$conflict['field']}:\n";
-            $formatted .= "   Current: {$conflict['current']}\n";
-            $formatted .= "   Previous ({$conflict['step']}): {$conflict['previous']}\n\n";
+            $formatted .= ($i + 1) . ". ";
+            
+            // Show only first 80 chars of current
+            $current = $conflict['current'];
+            if (strlen($current) > 80) {
+                $current = substr($current, 0, 80) . '...';
+            }
+            
+            // Show only first 80 chars of previous
+            $previous = $conflict['previous'];
+            if (strlen($previous) > 80) {
+                $previous = substr($previous, 0, 80) . '...';
+            }
+            
+            $formatted .= "New: {$current}\n";
+            $formatted .= "   vs\n";
+            $formatted .= "   Previous: {$previous}\n\n";
         }
         
-        $formatted .= "Which values should I use?";
+        $formatted .= 'Which version should I use?';
         
         return $formatted;
     }
@@ -1889,13 +2193,54 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         $section = $stepConfig['section'];
         $content = $this->formatStepData($data, $stepName);
         
+        Log::info('Updating plan section', [
+            'session' => $sessionId,
+            'step' => $stepName,
+            'section' => $section,
+            'content_length' => strlen($content),
+            'content_preview' => substr($content, 0, 100)
+        ]);
+        
+        // For step workflow, save directly to the section field (no mapping to legacy fields)
+        // The section names are: company_overview, financial_overview, products_services, 
+        // competitive_landscape, pain_points, recommendations, executive_summary
         $this->planService->updateSection($sessionId, $section, $content);
+        
+        // Also update company name if this is the first step
+        if ($stepName === 'company_basics') {
+            $state = $this->getSessionState($sessionId);
+            if (!empty($state['company_name'])) {
+                $this->planService->updateCompanyName($sessionId, $state['company_name']);
+            }
+        }
     }
     
     private function formatStepData(array $data, string $stepName): string
     {
         $formatted = '';
         
+        // If data has direct 'content' key (from Gemini synthesis or analysis)
+        if (isset($data['content']) && is_string($data['content'])) {
+            $formatted = $data['content'];
+            
+            // Add evidence sources if available
+            if (!empty($data['evidence']) && is_array($data['evidence'])) {
+                $formatted .= "\n\n━━━━━━━━━━━━━━━━━━━━━━\n\nSOURCES:\n";
+                foreach ($data['evidence'] as $idx => $evidence) {
+                    $source = $evidence['source'] ?? 'Unknown';
+                    $url = $evidence['url'] ?? '';
+                    $formatted .= "[" . ($idx + 1) . "] {$source}";
+                    if ($url) {
+                        $formatted .= "\n    {$url}";
+                    }
+                    $formatted .= "\n";
+                }
+            }
+            
+            return $formatted;
+        }
+        
+        // Legacy format handling
         foreach ($data as $key => $value) {
             if (is_array($value)) {
                 if (isset($value['content'])) {
@@ -1916,19 +2261,31 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     
     private function performDeepResearch(string $sessionId, string $stepName, array $state): array
     {
+        Log::info('Performing deep research', [
+            'step' => $stepName,
+            'session' => $sessionId
+        ]);
+        
         // Perform additional searches with more specific queries
         $stepConfig = $this->getStepConfig($stepName);
         $deepQuery = $stepConfig['search_query'] . ' detailed analysis trends';
         $deepQuery = str_replace('{company}', $state['company_name'], $deepQuery);
         
+        Log::info('Deep search query', ['query' => $deepQuery]);
+        
         $searchResults = $this->researchService->search($deepQuery);
         $deepData = $this->extractStepData($searchResults, $stepName);
         
-        // Merge with existing data
-        $state['step_data'][$stepName] = array_merge(
-            $state['step_data'][$stepName] ?? [],
-            $deepData
-        );
+        // If deep research also failed, provide a meaningful fallback
+        if (empty($deepData) || (isset($deepData['content']) && empty(trim($deepData['content'])))) {
+            Log::warning('Deep research also failed to extract data');
+            $deepData = [
+                'content' => 'Unable to extract meaningful data from search results.'
+            ];
+        }
+        
+        // Use the deep data (don't merge, replace)
+        $state['step_data'][$stepName] = $deepData;
         
         $this->saveSessionState($sessionId, $state);
         $this->updatePlanSection($sessionId, $stepName, $state['step_data'][$stepName]);
@@ -1949,20 +2306,79 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     
     private function extractCompanyName(string $message): ?string
     {
-        // Try to extract company name from message
+        // List of common action words to exclude
+        $excludeWords = ['generate', 'create', 'make', 'build', 'research', 'analyze', 'plan', 'document', 'comprehensive', 'detailed', 'final', 'account', 'please', 'can', 'you', 'tell', 'me', 'hello', 'hi', 'hey'];
+        
+        $trimmedMessage = trim($message);
+        $lowerMessage = strtolower($trimmedMessage);
+        
+        // Check for exclude words first
+        foreach ($excludeWords as $excludeWord) {
+            if ($lowerMessage === $excludeWord || str_contains($lowerMessage, $excludeWord . ' ') || str_contains($lowerMessage, ' ' . $excludeWord)) {
+                // Continue checking other patterns
+                break;
+            }
+        }
+        
+        // If message is just 1-5 words without exclude words, treat as company name
+        $words = array_filter(explode(' ', $trimmedMessage));
+        if (count($words) >= 1 && count($words) <= 5) {
+            $hasExclude = false;
+            foreach ($excludeWords as $excludeWord) {
+                if (in_array(strtolower($trimmedMessage), $excludeWords) || 
+                    str_word_count($lowerMessage) > 5) {
+                    $hasExclude = true;
+                    break;
+                }
+                
+                foreach ($words as $word) {
+                    if (in_array(strtolower($word), $excludeWords)) {
+                        $hasExclude = true;
+                        break 2;
+                    }
+                }
+            }
+            
+            if (!$hasExclude) {
+                // Capitalize properly for display
+                $companyName = implode(' ', array_map('ucfirst', array_map('strtolower', $words)));
+                Log::info('Extracted company name (direct)', ['name' => $companyName, 'original' => $trimmedMessage]);
+                return $companyName;
+            }
+        }
+        
+        // Try to extract company name from message with patterns
         $patterns = [
-            '/research\s+([A-Z][a-zA-Z0-9\s&]+?)(?:\s+company|\s+corp|\.|$)/i',
-            '/analyze\s+([A-Z][a-zA-Z0-9\s&]+?)(?:\s+company|\s+corp|\.|$)/i',
-            '/account plan for\s+([A-Z][a-zA-Z0-9\s&]+?)(?:\s+company|\s+corp|\.|$)/i',
-            '/([A-Z][a-zA-Z0-9\s&]{2,})(?:\s+company|\s+corp)?/i'
+            '/(?:research|analyze|create\s+(?:account\s+)?plan\s+for)\s+([A-Za-z][a-zA-Z0-9\s&]+?)(?:\s+comprehensively|\s+competitors?|\s+and|\s+market|\s+position|$)/i',
+            '/(?:account\s+plan\s+for|create\s+plan\s+for)\s+([A-Za-z][a-zA-Z0-9\s&]+?)(?:\s+company|\s+corp|\.|$)/i',
+            '/\b([A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+)*)\s+(?:company|corp|inc|ltd)/i',
         ];
         
         foreach ($patterns as $pattern) {
             if (preg_match($pattern, $message, $matches)) {
-                return trim($matches[1]);
+                $companyName = trim($matches[1]);
+                
+                // Capitalize properly
+                $companyName = implode(' ', array_map('ucfirst', array_map('strtolower', explode(' ', $companyName))));
+                
+                // Check if extracted name contains exclude words
+                $lowerName = strtolower($companyName);
+                $hasExcludeWord = false;
+                foreach ($excludeWords as $word) {
+                    if (str_contains($lowerName, $word)) {
+                        $hasExcludeWord = true;
+                        break;
+                    }
+                }
+                
+                if (!$hasExcludeWord && strlen($companyName) <= 50) {
+                    Log::info('Extracted company name (pattern)', ['name' => $companyName, 'pattern' => $pattern]);
+                    return $companyName;
+                }
             }
         }
         
+        Log::warning('Could not extract company name', ['message' => $message]);
         return null;
     }
 }

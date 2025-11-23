@@ -81,6 +81,14 @@ class AccountPlan extends Model
         'risks',
         'next_steps',
         
+        // Step-by-step workflow sections
+        'company_overview',
+        'financial_overview',
+        'products_services',
+        'competitive_landscape',
+        'pain_points',
+        'executive_summary',
+        
         // Legacy fields for compatibility
         'market_position',
         'financial_summary',
