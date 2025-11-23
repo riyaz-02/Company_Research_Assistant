@@ -320,6 +320,9 @@
             const message = messageInput.value.trim();
             if (!message) return;
 
+            // Disable all buttons to prevent clicking old buttons
+            disableAllButtons();
+
             // Add user message to chat
             addMessage('user', message);
             messageInput.value = '';
@@ -965,31 +968,40 @@ ${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}
         function createButtonGroup(buttons, context = {}) {
             const buttonContainer = document.createElement('div');
             buttonContainer.className = 'flex flex-wrap gap-2 mt-3';
-            
+
             buttons.forEach(btn => {
                 const button = document.createElement('button');
-                
+
                 // Handle both string and object button formats
                 const buttonText = typeof btn === 'string' ? btn : btn.text;
                 const buttonValue = typeof btn === 'string' ? btn : (btn.value || btn.text);
-                
+
                 button.textContent = buttonText;
                 button.className = 'glass-lighter border border-white/20 hover:bg-white/10 text-white px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 hover:scale-105';
                 button.onclick = () => handleButtonClick(buttonValue, context);
                 buttonContainer.appendChild(button);
             });
-            
+
             return buttonContainer;
         }
 
-        // Handle button clicks
+        // Disable all buttons in the chat after user interaction
+        function disableAllButtons() {
+            const allButtons = document.querySelectorAll('#chatMessages button');
+            allButtons.forEach(button => {
+                button.disabled = true;
+                button.classList.add('opacity-50', 'cursor-not-allowed');
+                button.classList.remove('hover:bg-white/10', 'hover:scale-105');
+            });
+        }        // Handle button clicks
         async function handleButtonClick(buttonText, context) {
             console.log('Button clicked:', buttonText, context);
-            
+
+            // Disable all buttons to prevent multiple clicks on old buttons
+            disableAllButtons();
+
             // Add user message showing button selection
-            addMessage('user', buttonText);
-            
-            // Send to backend
+            addMessage('user', buttonText);            // Send to backend
             const typingId = showTypingIndicator();
             showActivityIndicator();
             
@@ -1291,8 +1303,6 @@ ${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}
             setTimeout(() => {
                 const clearBtn = document.querySelector('button[onclick="clearAccountPlan()"]');
                 const generateBtn = document.querySelector('button[onclick="generateFinalPlan()"]');
-                console.log('Clear button found:', clearBtn ? 'YES' : 'NO', clearBtn);
-                console.log('Generate button found:', generateBtn ? 'YES' : 'NO', generateBtn);
                 
                 if (!clearBtn || !generateBtn) {
                     console.error('BUTTONS NOT FOUND IN DOM!');

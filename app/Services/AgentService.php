@@ -6,12 +6,14 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use App\Services\AIServiceClient;
 
 class AgentService
 {
     private ResearchService $researchService;
     private PlanService $planService;
     private MemoryService $memoryService;
+    private AIServiceClient $aiServiceClient;
     private string $llmProvider;
     private string $llmApiKey;
     private string $llmEndpoint;
@@ -20,18 +22,18 @@ class AgentService
     public function __construct(
         ResearchService $researchService,
         PlanService $planService,
-        MemoryService $memoryService
+        MemoryService $memoryService,
+        AIServiceClient $aiServiceClient
     ) {
         $this->researchService = $researchService;
         $this->planService = $planService;
         $this->memoryService = $memoryService;
-        
+        $this->aiServiceClient = $aiServiceClient;
+
         $this->llmProvider = env('LLM_PROVIDER', 'openai'); // openai, anthropic, gemini, etc.
         $this->llmApiKey = env('LLM_API_KEY', '');
         $this->llmEndpoint = env('LLM_ENDPOINT', '');
-    }
-
-    /**
+    }    /**
      * Process user message and run agent loop
      */
     public function processMessage(string $sessionId, string $userMessage): array
@@ -439,14 +441,25 @@ class AgentService
      */
     private function getSystemPrompt(): string
     {
-        return "You are ResearchAgent, an autonomous company research assistant specialized in comprehensive account planning.
+        return "You are ResearchAgent, an intelligent and conversational company research assistant specialized in comprehensive account planning.
+
+CORE PERSONALITY & BEHAVIOR:
+- You are CONVERSATIONAL and ADAPTIVE - understand natural language, not just exact keywords
+- Interpret user intent intelligently (\"yes continue\" = \"yes\", \"ok proceed\" = \"yes\", \"skip\" = \"next step\")
+- Handle different user types gracefully:
+  * The Confused User: Guide them patiently with clear options
+  * The Efficient User: Be concise, move quickly
+  * The Chatty User: Engage naturally while staying on task
+  * Edge Cases: Handle off-topic or invalid inputs gracefully without breaking character
+- NEVER force users to click buttons - understand their natural responses
+- When unclear, ask helpful clarifying questions rather than rigid \"use buttons\" messages
+- Vary your tone and phrasing naturally - avoid robotic repetition
 
 CRITICAL RULES:
 - ALWAYS respond with a valid JSON object. NO plain text responses unless action is 'finish'.
 - NEVER repeat the same sentence multiple times.
 - NEVER start every message with the same phrase.
-- Vary your tone slightly but remain professional.
-- Keep responses concise and professional.
+- Keep responses concise and professional but human-like.
 - Follow the systematic research methodology outlined below.
 
 REQUIRED JSON FORMAT:
@@ -704,187 +717,38 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
 
     /**
      * Call Google Gemini API with tool message support
+     * Now routes through AIServiceClient to Python service
      */
     private function callGemini(array $messages): ?array
     {
-        $model = env('LLM_MODEL', 'gemini-2.5-flash');
-        // Try v1beta first, fallback to v1 if model not found
-        $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key=" . $this->llmApiKey;
-        
-        // Convert messages format for Gemini
-        // Gemini uses a different format - it expects contents array
-        $contents = [];
-        $systemInstruction = '';
-        
-        foreach ($messages as $msg) {
-            $role = $msg['role'] ?? 'user';
-            $content = $msg['content'] ?? '';
+        try {
+            // Get session ID from memory if available
+            $sessionId = 'default';
             
-            if ($role === 'system') {
-                $systemInstruction .= $content . "\n";
-            } elseif ($role === 'tool') {
-                // Tool messages are added as user messages with tool prefix
-                $contents[] = [
-                    'role' => 'user',
-                    'parts' => [['text' => "Tool output: {$content}"]]
-                ];
-            } else {
-                // Gemini uses 'user' and 'model' roles
-                $geminiRole = $role === 'assistant' ? 'model' : 'user';
-                $contents[] = [
-                    'role' => $geminiRole,
-                    'parts' => [['text' => $content]]
+            // Use AIServiceClient to route to Python service
+            $result = $this->aiServiceClient->processMessages($messages, $sessionId);
+            
+            if ($result && isset($result['action'])) {
+                return $this->validateAction($result);
+            }
+            
+            Log::warning('AIServiceClient returned invalid response format');
+            return null;
+            
+        } catch (\Exception $e) {
+            Log::error('Error calling AIServiceClient: ' . $e->getMessage());
+            
+            // Handle rate limiting gracefully
+            if (str_contains($e->getMessage(), '429') || str_contains($e->getMessage(), 'rate limit')) {
+                return [
+                    'action' => 'ask_user',
+                    'question' => 'The API rate limit has been reached. Please wait about a minute before trying again.',
                 ];
             }
+            
+            return null;
         }
-        
-        // If no contents, add a placeholder
-        if (empty($contents)) {
-            $contents[] = [
-                'role' => 'user',
-                'parts' => [['text' => 'Hello']]
-            ];
-        }
-        
-        $payload = [
-            'contents' => $contents,
-        ];
-        
-        // Add system instruction if available (v1beta supports this)
-        if (!empty($systemInstruction)) {
-            $payload['systemInstruction'] = [
-                'parts' => [['text' => trim($systemInstruction)]]
-            ];
-        }
-        
-        // Generation config for v1beta - request JSON format
-        $payload['generationConfig'] = [
-            'temperature' => 0.7,
-            'responseMimeType' => 'application/json',
-        ];
-        
-        Log::info('Gemini API Call', [
-            'endpoint' => $endpoint,
-            'payload_size' => strlen(json_encode($payload)),
-            'contents_count' => count($contents),
-        ]);
-
-        $response = Http::withHeaders([
-            'Content-Type' => 'application/json',
-        ])->post($endpoint, $payload);
-
-        Log::info('Gemini API Response', [
-            'status' => $response->status(),
-            'successful' => $response->successful(),
-            'body_length' => strlen($response->body()),
-        ]);
-
-        // If v1beta fails with 404 or 400, try v1 API (without systemInstruction and responseMimeType)
-        if (!$response->successful() && ($response->status() === 404 || $response->status() === 400)) {
-            Log::info('v1beta API failed, trying v1 API', [
-                'error' => $response->body(),
-            ]);
-            $endpoint = "https://generativelanguage.googleapis.com/v1/models/{$model}:generateContent?key=" . $this->llmApiKey;
-            
-            // Rebuild payload for v1 (without unsupported fields)
-            $v1Payload = [
-                'contents' => $contents,
-            ];
-            
-            // Add system instruction as first user message for v1
-            if (!empty($systemInstruction)) {
-                array_unshift($v1Payload['contents'], [
-                    'role' => 'user',
-                    'parts' => [['text' => trim($systemInstruction)]]
-                ]);
-            }
-            
-            // Simple generation config for v1
-            $v1Payload['generationConfig'] = [
-                'temperature' => 0.7,
-            ];
-            
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-            ])->post($endpoint, $v1Payload);
-        }
-
-        if ($response->successful()) {
-            $data = $response->json();
-            
-            Log::info('Gemini Response Data', [
-                'has_candidates' => isset($data['candidates']),
-                'candidates_count' => isset($data['candidates']) ? count($data['candidates']) : 0,
-            ]);
-            
-            // Extract text from Gemini response
-            $text = '';
-            if (isset($data['candidates'][0]['content']['parts'][0]['text'])) {
-                $text = $data['candidates'][0]['content']['parts'][0]['text'];
-            }
-            
-            Log::info('Gemini Extracted Text', [
-                'text_length' => strlen($text),
-                'text_preview' => substr($text, 0, 200),
-            ]);
-            
-            if ($text) {
-                // Clean the text - remove markdown code blocks if present
-                $text = preg_replace('/```json\s*/', '', $text);
-                $text = preg_replace('/```\s*/', '', $text);
-                $text = trim($text);
-                
-                // Try to parse as JSON
-                $parsed = json_decode($text, true);
-                
-                if ($parsed && isset($parsed['action'])) {
-                    return $this->validateAction($parsed);
-                }
-                
-                // If not JSON, try to extract JSON from text using a more robust regex
-                if (preg_match('/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*"action"[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/s', $text, $matches)) {
-                    $parsed = json_decode($matches[0], true);
-                    if ($parsed && isset($parsed['action'])) {
-                        return $this->validateAction($parsed);
-                    }
-                }
-                
-                // Last resort: try to find any JSON object with action
-                if (preg_match('/\{.*?"action".*?\}/s', $text, $matches)) {
-                    $parsed = json_decode($matches[0], true);
-                    if ($parsed && isset($parsed['action'])) {
-                        return $this->validateAction($parsed);
-                    }
-                }
-                
-                // If we still can't parse, log the response for debugging
-                Log::warning('Gemini response could not be parsed as JSON: ' . substr($text, 0, 200));
-            }
-        } else {
-            $errorBody = $response->body();
-            Log::error('Gemini API error: ' . $errorBody);
-            
-            // Try to extract error message for user
-            $errorData = json_decode($errorBody, true);
-            if (isset($errorData['error']['message'])) {
-                $errorMessage = $errorData['error']['message'];
-                Log::error('Gemini API error message: ' . $errorMessage);
-                
-                // Handle rate limiting (429)
-                if ($response->status() === 429 || str_contains($errorMessage, 'quota') || str_contains($errorMessage, 'Quota exceeded')) {
-                    // Return a user-friendly message about rate limits
-                    return [
-                        'action' => 'ask_user',
-                        'question' => 'The API rate limit has been reached (10 requests per minute on free tier). Please wait about a minute before trying again.',
-                    ];
-                }
-            }
-        }
-
-        return null;
-    }
-
-    /**
+    }    /**
      * Call custom endpoint
      */
     private function callCustomEndpoint(array $messages): ?array
@@ -1038,6 +902,98 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     /**
      * Extract company name from user message and update plan
      */
+    /**
+     * Detect user intent from natural language
+     * Returns: 'yes', 'no', 'next step', 'deep research', 'retry_synthesis', or null
+     * 
+     * Designed to understand conversational responses like:
+     * - "yes continue", "sure", "ok", "proceed" → 'yes'
+     * - "skip", "next", "move on" → 'next step'
+     * - "no thanks", "stop" → 'no'
+     */
+    private function detectUserIntent(string $message): ?string
+    {
+        $lower = strtolower(trim($message));
+        
+        // Affirmative responses (yes, continue, proceed)
+        $affirmativePatterns = [
+            '/^(yes|yep|yeah|yup|sure|ok|okay|fine|alright|agreed)$/i',
+            '/^(yes|sure|ok|okay)\s+(continue|proceed|go ahead|sounds good|let\'?s go)/i',
+            '/^(continue|proceed|go ahead)\s*(please)?$/i',
+            '/^(let\'?s|lets)\s+(continue|proceed|go|move forward)/i',
+            '/\b(yes|continue|proceed)\b/i', // Partial match for phrases like "yes continue"
+        ];
+        
+        // Negative responses (no, stop, don't continue)
+        $negativePatterns = [
+            '/^(no|nope|nah|stop|quit|cancel|pass)$/i',
+            '/^(no|stop)\s+(thanks|please)/i',
+            '/^(i\'?m|im)\s+good$/i',
+            '/^not\s+now/i',
+            '/\b(no|nope|don\'?t|dont)\s+(continue|proceed)/i', // "no dont continue", "don't proceed"
+            '/\b(stop|halt|pause)\b/i', // Stop commands
+        ];
+        
+        // Next step requests
+        $nextStepPatterns = [
+            '/^(next|next step|move on|skip this|skip it)$/i',
+            '/^(go to|move to|proceed to)\s+next/i',
+            '/^next\s+(step|one|please)/i',
+        ];
+        
+        // Deep research requests  
+        $deepResearchPatterns = [
+            '/deep(er)?\s+research/i',
+            '/more\s+(detail|details|research|info|information)/i',
+            '/^research\s+(more|deeper)/i',
+            '/^(dig deeper|go deeper)/i',
+        ];
+        
+        // Retry requests
+        $retryPatterns = [
+            '/retry|try again|regenerate|redo|refresh/i',
+        ];
+        
+        // Check patterns in priority order
+        
+        // 1. Retry (highest priority)
+        foreach ($retryPatterns as $pattern) {
+            if (preg_match($pattern, $lower)) {
+                return 'retry_synthesis';
+            }
+        }
+        
+        // 2. Deep research
+        foreach ($deepResearchPatterns as $pattern) {
+            if (preg_match($pattern, $lower)) {
+                return 'deep research';
+            }
+        }
+        
+        // 3. Next step
+        foreach ($nextStepPatterns as $pattern) {
+            if (preg_match($pattern, $lower)) {
+                return 'next step';
+            }
+        }
+        
+        // 4. Negative
+        foreach ($negativePatterns as $pattern) {
+            if (preg_match($pattern, $lower)) {
+                return 'no';
+            }
+        }
+        
+        // 5. Affirmative (last to avoid false positives)
+        foreach ($affirmativePatterns as $pattern) {
+            if (preg_match($pattern, $lower)) {
+                return 'yes';
+            }
+        }
+        
+        return null;
+    }
+    
     private function extractAndSetCompanyName(string $sessionId, string $userMessage): void
     {
         // Simple extraction - look for common patterns
@@ -1449,30 +1405,58 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     private function processStepResponse(string $sessionId, string $userMessage, array $state): array
     {
         $lowerMessage = strtolower(trim($userMessage));
+
+        // Detect user intent using natural language understanding
+        $intent = $this->detectUserIntent($userMessage);
         
-        // Handle retry synthesis button
-        if ($lowerMessage === 'retry_synthesis' || $lowerMessage === 'retry synthesis') {
+        Log::info('Processing step response', [
+            'message' => $userMessage,
+            'detected_intent' => $intent,
+            'current_step' => $state['current_step'] ?? 'unknown'
+        ]);
+
+        // Handle retry synthesis
+        if ($intent === 'retry_synthesis') {
             return $this->handleRetrySynthesis($sessionId, $state);
         }
-        
-        // Handle button responses
-        if (in_array($lowerMessage, ['yes', 'no', 'next step', 'deep research'])) {
-            return $this->handleStepDecision($sessionId, $lowerMessage, $state);
+
+        // Handle clear intents (yes/no/next/deep research)
+        if (in_array($intent, ['yes', 'no', 'next step', 'deep research'])) {
+            return $this->handleStepDecision($sessionId, $intent, $state);
         }
-        
+
         // Handle conflict resolution
         if (isset($state['pending_conflicts']) && !empty($state['pending_conflicts'])) {
             return $this->handleConflictResolution($sessionId, $userMessage, $state);
         }
-        
-        // Default: treat as clarification or additional input
+
+        // Graceful fallback for unclear responses
+        if ($intent === null) {
+            $currentStep = $state['current_step'] ?? 'this step';
+            $stepName = ucwords(str_replace('_', ' ', $currentStep));
+            
+            return [[
+                'type' => 'ask_user',
+                'content' => "I'd love to help you with {$stepName}, but I'm not quite sure what you'd like me to do. Here are your options:\n\n" .
+                            "• **Continue** - Move to the next research step\n" .
+                            "• **Deep Research** - Gather more detailed information on this topic\n" .
+                            "• **Next Step** - Skip to the next section\n" .
+                            "• **Retry** - Regenerate the current analysis\n\n" .
+                            "Just let me know what works best!",
+                'buttons' => [
+                    ['text' => 'Yes, Continue', 'value' => 'yes'],
+                    ['text' => 'Deep Research', 'value' => 'deep research'],
+                    ['text' => 'Next Step', 'value' => 'next step']
+                ]
+            ]];
+        }
+
+        // Final fallback (shouldn't reach here often)
         return [[
             'type' => 'message',
             'content' => 'I need a clear response. Please use the buttons provided or clarify your request.'
         ]];
-    }
-    
-    private function handleRetrySynthesis(string $sessionId, array $state): array
+    }    private function handleRetrySynthesis(string $sessionId, array $state): array
     {
         $stepName = $state['current_step'];
         
@@ -1604,80 +1588,95 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     {
         $currentStep = $state['current_step'];
         
+        Log::info('Handling step decision', ['decision' => $decision, 'current_step' => $currentStep]);
+
         if ($decision === 'yes') {
             // Mark step complete and move to next
             $state['completed_steps'][] = $currentStep;
             $nextStep = $this->getNextStep($currentStep);
-            
+
             if (!$nextStep) {
                 // All steps complete
                 $state['step_mode'] = false;
                 $this->saveSessionState($sessionId, $state);
-                
+
                 return [[
                     'type' => 'finish',
                     'content' => "Research complete! I've generated a comprehensive account plan for {$state['company_name']}."
                 ]];
             }
-            
+
             $state['current_step'] = $nextStep;
             $this->saveSessionState($sessionId, $state);
-            
+
             $stepNum = count($state['completed_steps']) + 1;
             return [[
                 'type' => 'progress',
                 'message' => "Step {$stepNum}/7: " . $this->getStepConfig($nextStep)['progress_message']
             ], ...$this->performStep($sessionId, $nextStep, $state)];
+
+        } elseif ($decision === 'no') {
+            // User wants to stop or modify current approach
+            $currentStepName = ucwords(str_replace('_', ' ', $currentStep));
             
+            return [[
+                'type' => 'ask_user',
+                'content' => "No problem! What would you like to do with {$currentStepName}?",
+                'buttons' => [
+                    ['text' => '🔄 Retry This Step', 'value' => 'retry_synthesis'],
+                    ['text' => '🔍 Deep Research', 'value' => 'deep research'],
+                    ['text' => '⏭️ Skip to Next', 'value' => 'next step'],
+                    ['text' => '⛔ Stop Research', 'value' => 'stop']
+                ]
+            ]];
+
         } elseif ($decision === 'deep research') {
             // Perform deeper analysis
             return [[
                 'type' => 'progress',
                 'message' => 'Performing deep research...'
             ], ...$this->performDeepResearch($sessionId, $currentStep, $state)];
-            
+
         } elseif ($decision === 'next step' || $decision === 'skip') {
             // Skip to next step
             $state['completed_steps'][] = $currentStep;
             $nextStep = $this->getNextStep($currentStep);
-            
+
             if (!$nextStep) {
                 $state['step_mode'] = false;
                 $this->saveSessionState($sessionId, $state);
-                
+
                 return [[
                     'type' => 'finish',
                     'content' => "Research complete!"
                 ]];
             }
-            
+
             $state['current_step'] = $nextStep;
             $this->saveSessionState($sessionId, $state);
-            
+
             $stepNum = count($state['completed_steps']) + 1;
             return [[
                 'type' => 'progress',
                 'message' => "Step {$stepNum}/7: " . $this->getStepConfig($nextStep)['progress_message']
             ], ...$this->performStep($sessionId, $nextStep, $state)];
-            
+
         } elseif ($decision === 'stop') {
             // User wants to stop research
             $state['step_mode'] = false;
             $this->saveSessionState($sessionId, $state);
-            
+
             return [[
                 'type' => 'message',
                 'content' => "Research stopped. You can review the data collected so far in the Account Plan section."
             ]];
         }
-        
+
         return [[
             'type' => 'message',
             'content' => 'Please choose an option using the buttons.'
         ]];
-    }
-    
-    private function getStepConfig(string $stepName): array
+    }    private function getStepConfig(string $stepName): array
     {
         $steps = [
             'company_basics' => [
@@ -1915,164 +1914,98 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             'instruction_length' => strlen($instruction),
             'raw_data_length' => strlen($rawData)
         ]);
-        
+
         if (empty(trim($rawData))) {
             Log::warning('Empty raw data provided to synthesis');
             return 'No data available to synthesize.';
         }
-        
-        $fullPrompt = "{$instruction}\n\nRaw Data:\n{$rawData}\n\nProvide synthesized output as plain text.";
-        
-        $result = $this->callGeminiWithRetry($fullPrompt);
-        
-        Log::info('Synthesis result', [
-            'success' => !empty($result['content']),
-            'content_length' => isset($result['content']) ? strlen($result['content']) : 0
-        ]);
-        
-        return $result['content'] ?? 'Unable to synthesize data at this time.';
-    }
-    
-    private function analyzeWithGemini(string $prompt, string $context): array
+
+        try {
+            // Use AIServiceClient to synthesize through Python service
+            $fullPrompt = "{$instruction}\n\nRaw Data:\n{$rawData}\n\nProvide synthesized output as plain text.";
+            $result = $this->aiServiceClient->analyzeData($fullPrompt, '', 'default');
+            
+            Log::info('Synthesis result', [
+                'success' => !empty($result),
+                'content_length' => is_string($result) ? strlen($result) : 0
+            ]);
+            
+            return $result ?: 'Unable to synthesize data at this time.';
+            
+        } catch (\Exception $e) {
+            Log::error('Error synthesizing with AIServiceClient: ' . $e->getMessage());
+            return 'Unable to synthesize data at this time.';
+        }
+    }    private function analyzeWithGemini(string $prompt, string $context): array
     {
         $fullPrompt = "{$prompt}\n\nContext:\n{$context}\n\nProvide a detailed analysis in plain text format.";
-        
-        // Construct Gemini endpoint if not set
-        $endpoint = $this->llmEndpoint;
-        if (empty($endpoint) && $this->llmProvider === 'gemini') {
-            $apiKey = $this->llmApiKey ?: env('GEMINI_API_KEY');
-            $model = 'gemini-2.0-flash-exp';
-            $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+
+        try {
+            // Use AIServiceClient to analyze through Python service
+            $result = $this->aiServiceClient->analyzeData($fullPrompt, '', 'default');
+            
+            // analyzeData returns a string
+            if (is_string($result) && !empty($result)) {
+                return ['content' => $result, 'sources' => ['AI Analysis']];
+            }
+            
+            return ['content' => 'Unable to generate analysis.', 'sources' => ['AI Analysis']];
+            
+        } catch (\Exception $e) {
+            Log::error('Error analyzing with AIServiceClient: ' . $e->getMessage());
+            return ['content' => 'Unable to generate analysis at this time.', 'sources' => ['AI Analysis']];
         }
-        
-        $result = $this->callGeminiWithRetry($fullPrompt);
-        return $result;
-    }
-    
-    private function callGeminiWithRetry(string $prompt, int $maxRetries = 4, int $initialDelay = 3): array
+    }    private function callGeminiWithRetry(string $prompt, int $maxRetries = 4, int $initialDelay = 3): array
     {
         // Check cache first
         $cacheKey = 'gemini_' . md5($prompt);
         $cached = Cache::get($cacheKey);
         if ($cached) {
-            Log::info('Using cached Gemini response', ['cache_key' => $cacheKey]);
+            Log::info('Using cached response', ['cache_key' => $cacheKey]);
             return $cached;
         }
-        
-        // Construct Gemini endpoint
-        $endpoint = $this->llmEndpoint;
-        if (empty($endpoint) && $this->llmProvider === 'gemini') {
-            $apiKey = $this->llmApiKey ?: env('GEMINI_API_KEY');
-            $model = 'gemini-2.0-flash-exp';
-            $endpoint = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
-        }
-        
-        if (empty($endpoint)) {
-            Log::error('Gemini endpoint not configured');
-            return [
-                'content' => 'AI analysis unavailable - API endpoint not configured.',
-                'sources' => ['AI Analysis']
-            ];
-        }
-        
-        // THROTTLING: Wait 2-4 seconds before API call to prevent rate limit bursts
-        $throttleMs = rand(2000, 4000);
-        Log::info('Throttling Gemini call', ['delay_ms' => $throttleMs]);
-        usleep($throttleMs * 1000);
-        
-        Log::info('Calling Gemini with retry capability', [
+
+        Log::info('Calling AIServiceClient with retry capability', [
             'prompt_length' => strlen($prompt),
             'max_retries' => $maxRetries
         ]);
-        
+
         try {
-            $retryDelay = $initialDelay;
+            // Use AIServiceClient which handles retries internally
+            $result = $this->aiServiceClient->analyzeData($prompt, '', 'default');
             
-            for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
-                $response = Http::timeout(60)->post($endpoint, [
-                    'contents' => [
-                        [
-                            'parts' => [
-                                ['text' => $prompt]
-                            ]
-                        ]
-                    ],
-                    'generationConfig' => [
-                        'temperature' => 0.7,
-                        'maxOutputTokens' => 2048
-                    ]
-                ]);
-                
-                if ($response->successful()) {
-                    $result = $response->json();
-                    $text = $result['candidates'][0]['content']['parts'][0]['text'] ?? '';
-                    
-                    Log::info('Gemini analysis response', [
-                        'attempt' => $attempt,
-                        'text_length' => strlen($text),
-                        'preview' => substr($text, 0, 200)
-                    ]);
-                    
-                    if (empty($text)) {
-                        Log::warning('Empty Gemini response', ['result' => $result]);
-                        return [
-                            'content' => 'Unable to generate analysis at this time. Please try again.',
-                            'sources' => ['AI Analysis']
-                        ];
-                    }
-                    
-                    $result = [
-                        'content' => $text,
-                        'sources' => ['AI Analysis']
-                    ];
-                    
-                    // Cache successful response for 2 hours
-                    Cache::put($cacheKey, $result, now()->addHours(2));
-                    Log::info('Cached Gemini response', ['cache_key' => $cacheKey]);
-                    
-                    return $result;
-                }
-                
-                // Handle rate limiting with exponential backoff
-                if ($response->status() === 429 && $attempt < $maxRetries) {
-                    Log::warning("Gemini rate limit hit, retrying in {$retryDelay}s (attempt {$attempt}/{$maxRetries})");
-                    sleep($retryDelay);
-                    // Extended retry schedule: 3s → 8s → 20s → 45s
-                    $retryDelay = match($attempt) {
-                        1 => 8,
-                        2 => 20,
-                        3 => 45,
-                        default => 60
-                    };
-                    continue;
-                }
-                
-                // Other error - log and return message
-                Log::error('Gemini API error after retries', [
-                    'status' => $response->status(),
-                    'attempt' => $attempt,
-                    'body' => substr($response->body(), 0, 500)
-                ]);
-                break;
+            // analyzeData returns a string
+            if (empty($result)) {
+                Log::warning('Empty response from AIServiceClient');
+                return [
+                    'content' => 'Unable to generate analysis at this time. Please try again.',
+                    'sources' => ['AI Analysis']
+                ];
             }
             
-            // If we get here, all retries failed
-            return [
-                'content' => 'Analysis temporarily unavailable. Please try again in a moment. (API Status: ' . ($response->status() ?? 'unknown') . ')',
+            $response = [
+                'content' => $result,
                 'sources' => ['AI Analysis']
             ];
+            
+            // Cache successful response for 2 hours
+            Cache::put($cacheKey, $response, now()->addHours(2));
+            Log::info('Cached response', ['cache_key' => $cacheKey]);
+            
+            return $response;
+            
         } catch (\Exception $e) {
-            Log::error('Gemini analysis exception', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+            Log::error('Error calling AIServiceClient with retry', [
+                'error' => $e->getMessage()
             ]);
             
             return [
-                'content' => 'Analysis error: ' . $e->getMessage(),
+                'content' => 'Analysis temporarily unavailable. Please try again in a moment.',
                 'sources' => ['AI Analysis']
             ];
         }
     }
+        
     
     private function detectConflicts(array $data, string $stepName, array $state): array
     {
