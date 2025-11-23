@@ -1684,7 +1684,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'section' => 'pain_points',
                 'use_search' => false,
                 'search_query' => '',
-                'prompt' => 'Based on all the research data gathered for {company}, identify and synthesize key pain points, challenges, and business/technical obstacles.\n\nInstructions:\n- Analyze the company\'s financial situation, products, competitive position\n- Identify 3-5 main pain points or challenges\n- Be specific and actionable\n- Use bullet points for clarity\n- Maximum 250 words\n- Do not speculate; base insights on provided data',
+                'prompt' => 'Based on all the research data gathered for {company}, identify and synthesize key pain points, challenges, and business/technical obstacles.\n\nInstructions:\n- Analyze the company\'s financial situation, products, competitive position\n- Identify 3-5 main pain points or challenges\n- Be specific and actionable\n- Use bullet points for clarity with single line breaks between items\n- Write complete descriptions - do NOT use \'...\'\n- Maximum 250 words\n- Do not speculate; base insights on provided data',
                 'progress_message' => 'Analyzing pain points...',
                 'confirmation_message' => 'Pain points identified. Should I generate recommendations?'
             ],
@@ -1692,7 +1692,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'section' => 'recommendations',
                 'use_search' => false,
                 'search_query' => '',
-                'prompt' => 'Generate strategic recommendations for engaging {company} based on all research data.\n\nInstructions:\n- Provide 4-6 actionable recommendations\n- Base recommendations on identified pain points and competitive landscape\n- Be specific about potential solutions or engagement strategies\n- Use bullet points for each recommendation\n- Maximum 300 words\n- Focus on value proposition and strategic fit',
+                'prompt' => 'Generate strategic recommendations for engaging {company} based on all research data.\n\nInstructions:\n- Provide 4-6 actionable recommendations\n- Base recommendations on identified pain points and competitive landscape\n- Be specific about potential solutions or engagement strategies\n- Use bullet points for each recommendation with single line breaks\n- Write complete information - do NOT truncate with \'...\'\n- Maximum 300 words\n- Focus on value proposition and strategic fit',
                 'progress_message' => 'Generating recommendations...',
                 'confirmation_message' => 'Recommendations ready. Create the final account plan?'
             ],
@@ -1700,7 +1700,7 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'section' => 'executive_summary',
                 'use_search' => false,
                 'search_query' => '',
-                'prompt' => 'Create a comprehensive executive summary that synthesizes all research for {company}.\n\nInstructions:\n- Summarize company overview, financial health, products, and competitive position\n- Highlight key pain points and opportunities\n- Conclude with top 3 strategic recommendations\n- Use clear structure with headings\n- Maximum 400 words\n- Professional, concise, actionable tone',
+                'prompt' => 'Create a comprehensive executive summary that synthesizes all research for {company}.\n\nInstructions:\n- Summarize company overview, financial health, products, and competitive position\n- Highlight key pain points and opportunities\n- Conclude with top 3 strategic recommendations\n- Use clear structure with section headings\n- Write complete sentences - do NOT use ellipsis or \'...\'\n- Single line breaks between sections\n- Maximum 400 words\n- Professional, concise, actionable tone',
                 'progress_message' => 'Creating final account plan...',
                 'confirmation_message' => 'Final account plan complete!'
             ]
@@ -1784,8 +1784,14 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             // Format raw evidence into professional readable text
             $formattedContent = "";
             foreach ($evidence as $idx => $item) {
-                if ($idx > 0) $formattedContent .= "\n\n";
-                $formattedContent .= "• " . trim($item['snippet']);
+                if ($idx > 0) $formattedContent .= "\n";
+                // Clean up snippet - remove all newlines, trailing ellipsis, and extra spaces
+                $snippet = trim($item['snippet']);
+                $snippet = str_replace(["\r\n", "\n", "\r"], ' ', $snippet); // remove all line breaks
+                $snippet = preg_replace('/\s+/', ' ', $snippet); // collapse multiple spaces to single space
+                $snippet = rtrim($snippet, '.'); // remove trailing dots from truncation
+                $snippet = trim($snippet); // final trim
+                $formattedContent .= "• " . $snippet;
             }
             
             return [
@@ -1795,41 +1801,55 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         }
         
         return [
-            'content' => $synthesizedContent,
+            'content' => $this->cleanContent($synthesizedContent),
             'evidence' => $evidence
         ];
+    }
+    
+    private function cleanContent(string $content): string
+    {
+        // Remove multiple consecutive newlines (blank lines)
+        $content = preg_replace('/\n{3,}/', "\n\n", $content); // max 2 newlines (1 blank line)
+        $content = preg_replace('/\n{2,}/', "\n", $content); // convert all double newlines to single
+        // Trim any leading/trailing whitespace
+        return trim($content);
     }
     
     private function getSynthesisPromptForStep(string $stepName): string
     {
         return match($stepName) {
             'company_basics' => 
-                "Synthesize the following search results into a clean, concise company overview.\n" .
+                "Synthesize the following search results into a clean, professional company overview.\n" .
                 "Include: headquarters location, industry, employee count, founding year, and brief description.\n" .
                 "Remove duplicate information. Use bullet points for key facts. Maximum 200 words.\n" .
-                "Do not paste raw snippets. Summarize factually.",
+                "Write complete sentences - do NOT truncate with '...' or ellipsis.\n" .
+                "Format with single line breaks between bullets. Be factual and complete.",
             
             'financial' => 
                 "Synthesize the following financial data into a clear financial overview.\n" .
                 "Include: revenue figures, growth rates, funding rounds, valuation, investors.\n" .
                 "Use bullet points for key metrics. Remove duplicate numbers. Maximum 200 words.\n" .
-                "Format currency consistently. Do not paste raw snippets.",
+                "Write complete information - do NOT use '...' or truncate.\n" .
+                "Format currency consistently. Single line breaks between bullets.",
             
             'products_tech' => 
                 "Synthesize the following information into a products and services overview.\n" .
                 "Include: main product lines, key services, technology stack, target customers.\n" .
                 "Group related products together. Use bullet points. Maximum 200 words.\n" .
-                "Remove repetitive content. Summarize concisely.",
+                "Write complete descriptions - do NOT truncate with '...'.\n" .
+                "Single line breaks between bullets. Be concise but complete.",
             
             'competitors' => 
                 "Synthesize the following into a competitive landscape analysis.\n" .
                 "List main competitors with brief descriptions. Identify market positioning.\n" .
                 "Use bullet points for each competitor. Maximum 200 words.\n" .
-                "Remove duplicate mentions. Be factual and concise.",
+                "Write complete information - do NOT use ellipsis or '...'.\n" .
+                "Single line breaks between bullets. Be factual and complete.",
             
             default => 
                 "Summarize the following information concisely.\n" .
-                "Remove duplicate content. Use clear structure. Maximum 200 words."
+                "Remove duplicate content. Use clear structure. Maximum 200 words.\n" .
+                "Write complete sentences - do NOT truncate. Single line breaks between bullets."
         };
     }
     
@@ -2091,26 +2111,44 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         foreach ($conflicts as $i => $conflict) {
             $formatted .= ($i + 1) . ". ";
             
-            // Show only first 80 chars of current
+            // Extract first key phrase (up to 50 chars) from current
             $current = $conflict['current'];
-            if (strlen($current) > 80) {
-                $current = substr($current, 0, 80) . '...';
-            }
+            $currentSummary = $this->summarizeText($current, 50);
             
-            // Show only first 80 chars of previous
+            // Extract first key phrase (up to 50 chars) from previous  
             $previous = $conflict['previous'];
-            if (strlen($previous) > 80) {
-                $previous = substr($previous, 0, 80) . '...';
-            }
+            $previousSummary = $this->summarizeText($previous, 50);
             
-            $formatted .= "New: {$current}\n";
-            $formatted .= "   vs\n";
-            $formatted .= "   Previous: {$previous}\n\n";
+            $formatted .= "Option A: {$currentSummary}\n";
+            $formatted .= "   Option B: {$previousSummary}\n\n";
         }
         
-        $formatted .= 'Which version should I use?';
+        $formatted .= 'Choose which version:';
         
         return $formatted;
+    }
+    
+    private function summarizeText(string $text, int $maxLength = 50): string
+    {
+        // Remove bullet points and newlines
+        $text = str_replace(['•', '\n', '\r'], ' ', $text);
+        // Collapse multiple spaces
+        $text = preg_replace('/\s+/', ' ', $text);
+        $text = trim($text);
+        
+        // Get first sentence or first maxLength chars
+        if (strlen($text) <= $maxLength) {
+            return $text;
+        }
+        
+        // Try to find end of first sentence
+        $sentenceEnd = strpos($text, '.');
+        if ($sentenceEnd !== false && $sentenceEnd <= $maxLength) {
+            return substr($text, 0, $sentenceEnd);
+        }
+        
+        // Otherwise truncate at maxLength
+        return substr($text, 0, $maxLength) . '...';
     }
     
     private function createConflictButtons(array $conflicts): array
@@ -2118,12 +2156,16 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         $buttons = [];
         
         foreach ($conflicts as $i => $conflict) {
+            // Create concise button labels
+            $currentLabel = $this->summarizeText($conflict['current'], 40);
+            $previousLabel = $this->summarizeText($conflict['previous'], 40);
+            
             $buttons[] = [
-                'text' => "Use Current ({$conflict['current']})",
+                'text' => "Option A: {$currentLabel}",
                 'value' => "conflict_{$i}_current"
             ];
             $buttons[] = [
-                'text' => "Use Previous ({$conflict['previous']})",
+                'text' => "Option B: {$previousLabel}",
                 'value' => "conflict_{$i}_previous"
             ];
         }
@@ -2221,20 +2263,22 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         
         // If data has direct 'content' key (from Gemini synthesis or analysis)
         if (isset($data['content']) && is_string($data['content'])) {
-            $formatted = $data['content'];
+            $formatted = trim($data['content']); // Remove leading/trailing whitespace
             
             // Add evidence sources if available
             if (!empty($data['evidence']) && is_array($data['evidence'])) {
-                $formatted .= "\n\n━━━━━━━━━━━━━━━━━━━━━━\n\nSOURCES:\n";
+                $formatted .= "\n\n━━━━━━━━━━━━━━━━━━━━━━\nSOURCES:\n";
                 foreach ($data['evidence'] as $idx => $evidence) {
                     $source = $evidence['source'] ?? 'Unknown';
                     $url = $evidence['url'] ?? '';
                     $formatted .= "[" . ($idx + 1) . "] {$source}";
                     if ($url) {
-                        $formatted .= "\n    {$url}";
+                        $formatted .= " - {$url}";
                     }
                     $formatted .= "\n";
                 }
+                // Remove trailing newline after last source
+                $formatted = rtrim($formatted);
             }
             
             return $formatted;
