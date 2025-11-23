@@ -40,11 +40,24 @@ class AgentController extends Controller
 
         try {
             // Set a longer timeout for agent processing
-            set_time_limit(60); // 60 seconds instead of default 30
+            set_time_limit(120); // 2 minutes for comprehensive research
             
             $result = $this->agentService->processMessage($sessionId, $userMessage);
 
-            // If no responses were generated, provide a helpful error
+            // Handle array responses (step-by-step mode)
+            if (is_array($result) && isset($result[0]['type'])) {
+                // Format responses for frontend
+                $formattedResponses = $this->formatResponses($result);
+                
+                return response()->json([
+                    'success' => true,
+                    'session_id' => $sessionId,
+                    'responses' => $formattedResponses,
+                    'plan' => $this->planService->getPlanSections($sessionId),
+                ]);
+            }
+
+            // Handle legacy response format
             if (empty($result['responses'])) {
                 return response()->json([
                     'success' => false,
@@ -67,6 +80,62 @@ class AgentController extends Controller
                 'message' => $e->getMessage(),
             ], 500);
         }
+    }
+    
+    /**
+     * Format responses for frontend consumption
+     */
+    private function formatResponses(array $responses): array
+    {
+        $formatted = [];
+        
+        foreach ($responses as $response) {
+            $type = $response['type'] ?? 'message';
+            
+            switch ($type) {
+                case 'progress':
+                    $formatted[] = [
+                        'type' => 'progress',
+                        'message' => $response['message'] ?? 'Processing...'
+                    ];
+                    break;
+                    
+                case 'ask_user':
+                    $formatted[] = [
+                        'type' => 'ask_user',
+                        'content' => $response['content'] ?? '',
+                        'buttons' => $response['buttons'] ?? []
+                    ];
+                    break;
+                    
+                case 'update_plan':
+                    $formatted[] = [
+                        'type' => 'update_plan',
+                        'section' => $response['section'] ?? '',
+                        'content' => $response['content'] ?? ''
+                    ];
+                    break;
+                    
+                case 'message':
+                    $formatted[] = [
+                        'type' => 'message',
+                        'content' => $response['content'] ?? ''
+                    ];
+                    break;
+                    
+                case 'finish':
+                    $formatted[] = [
+                        'type' => 'finish',
+                        'content' => $response['content'] ?? 'Research complete!'
+                    ];
+                    break;
+                    
+                default:
+                    $formatted[] = $response;
+            }
+        }
+        
+        return $formatted;
     }
 
     /**
