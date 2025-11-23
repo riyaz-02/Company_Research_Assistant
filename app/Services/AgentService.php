@@ -2,9 +2,9 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 
 class AgentService
@@ -1450,6 +1450,11 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     {
         $lowerMessage = strtolower(trim($userMessage));
         
+        // Handle retry synthesis button
+        if ($lowerMessage === 'retry_synthesis' || $lowerMessage === 'retry synthesis') {
+            return $this->handleRetrySynthesis($sessionId, $state);
+        }
+        
         // Handle button responses
         if (in_array($lowerMessage, ['yes', 'no', 'next step', 'deep research'])) {
             return $this->handleStepDecision($sessionId, $lowerMessage, $state);
@@ -1465,6 +1470,26 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             'type' => 'message',
             'content' => 'I need a clear response. Please use the buttons provided or clarify your request.'
         ]];
+    }
+    
+    private function handleRetrySynthesis(string $sessionId, array $state): array
+    {
+        $stepName = $state['current_step'];
+        
+        Log::info('Retrying synthesis for step', ['step' => $stepName]);
+        
+        // Clear Gemini cache for this step to force fresh API call
+        $stepData = $state['step_data'][$stepName] ?? [];
+        if (isset($stepData['content'])) {
+            $cacheKey = 'gemini_' . md5($stepData['content']);
+            Cache::forget($cacheKey);
+        }
+        
+        // Re-perform the step (will reuse cached search results)
+        return [[
+            'type' => 'message',
+            'content' => 'Retrying synthesis with fresh API call...'
+        ], ...$this->performStep($sessionId, $stepName, $state)];
     }
     
     private function performStep(string $sessionId, string $stepName, array $state): array
@@ -1553,14 +1578,21 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             'content' => $this->formatStepData($state['step_data'][$stepName], $stepName)
         ];
         
+        // Check if synthesis failed and add retry button
+        $buttons = [
+            ['text' => 'Yes, Continue', 'value' => 'yes'],
+            ['text' => 'Deep Research', 'value' => 'deep research'],
+            ['text' => 'Next Step', 'value' => 'next step']
+        ];
+        
+        if (isset($state['step_data'][$stepName]['needs_retry']) && $state['step_data'][$stepName]['needs_retry']) {
+            array_unshift($buttons, ['text' => '🔄 Retry Synthesis', 'value' => 'retry_synthesis']);
+        }
+        
         $responses[] = [
             'type' => 'ask_user',
             'content' => $stepConfig['confirmation_message'],
-            'buttons' => [
-                ['text' => 'Yes, Continue', 'value' => 'yes'],
-                ['text' => 'Deep Research', 'value' => 'deep research'],
-                ['text' => 'Next Step', 'value' => 'next step']
-            ]
+            'buttons' => $buttons
         ];
         
         $this->saveSessionState($sessionId, $state);
@@ -1758,12 +1790,22 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             return [];
         }
         
-        // Collect raw data for synthesis
-        $rawData = implode("\n\n", array_column($evidence, 'snippet'));
+        // Collect and clean raw data for synthesis (token reduction)
+        $snippets = array_column($evidence, 'snippet');
+        $cleanedSnippets = array_map(function($snippet) {
+            // Remove duplicate lines
+            $lines = array_unique(explode("\n", $snippet));
+            // Trim to max 200 chars per snippet
+            $cleaned = implode(" ", $lines);
+            return substr($cleaned, 0, 200);
+        }, $snippets);
+        
+        $rawData = implode("\n\n", $cleanedSnippets);
         
         Log::info('Calling synthesizeWithGemini', [
             'step' => $stepName,
-            'raw_data_length' => strlen($rawData)
+            'raw_data_length' => strlen($rawData),
+            'original_length' => strlen(implode("\n\n", $snippets))
         ]);
         
         // Use Gemini to synthesize the raw search results into clean content
@@ -1796,7 +1838,8 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             
             return [
                 'content' => $formattedContent,
-                'evidence' => $evidence
+                'evidence' => $evidence,
+                'needs_retry' => true  // Flag for retry button
             ];
         }
         
@@ -1906,8 +1949,16 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         return $result;
     }
     
-    private function callGeminiWithRetry(string $prompt, int $maxRetries = 3, int $initialDelay = 5): array
+    private function callGeminiWithRetry(string $prompt, int $maxRetries = 4, int $initialDelay = 3): array
     {
+        // Check cache first
+        $cacheKey = 'gemini_' . md5($prompt);
+        $cached = Cache::get($cacheKey);
+        if ($cached) {
+            Log::info('Using cached Gemini response', ['cache_key' => $cacheKey]);
+            return $cached;
+        }
+        
         // Construct Gemini endpoint
         $endpoint = $this->llmEndpoint;
         if (empty($endpoint) && $this->llmProvider === 'gemini') {
@@ -1923,6 +1974,11 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'sources' => ['AI Analysis']
             ];
         }
+        
+        // THROTTLING: Wait 2-4 seconds before API call to prevent rate limit bursts
+        $throttleMs = rand(2000, 4000);
+        Log::info('Throttling Gemini call', ['delay_ms' => $throttleMs]);
+        usleep($throttleMs * 1000);
         
         Log::info('Calling Gemini with retry capability', [
             'prompt_length' => strlen($prompt),
@@ -1965,17 +2021,29 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                         ];
                     }
                     
-                    return [
+                    $result = [
                         'content' => $text,
                         'sources' => ['AI Analysis']
                     ];
+                    
+                    // Cache successful response for 2 hours
+                    Cache::put($cacheKey, $result, now()->addHours(2));
+                    Log::info('Cached Gemini response', ['cache_key' => $cacheKey]);
+                    
+                    return $result;
                 }
                 
                 // Handle rate limiting with exponential backoff
                 if ($response->status() === 429 && $attempt < $maxRetries) {
                     Log::warning("Gemini rate limit hit, retrying in {$retryDelay}s (attempt {$attempt}/{$maxRetries})");
                     sleep($retryDelay);
-                    $retryDelay = min($retryDelay * 2, 15); // Exponential backoff, max 15s
+                    // Extended retry schedule: 3s → 8s → 20s → 45s
+                    $retryDelay = match($attempt) {
+                        1 => 8,
+                        2 => 20,
+                        3 => 45,
+                        default => 60
+                    };
                     continue;
                 }
                 
@@ -2021,6 +2089,124 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             }
         }
         
+        // Skip if conflicts already asked for this step
+        if (isset($state['conflicts_asked'][$stepName])) {
+            Log::info('Skipping conflict detection - already asked for this step');
+            return [];
+        }
+        
+        // Extract current content
+        $currentContent = $data['content'] ?? '';
+        if (empty($currentContent)) {
+            return [];
+        }
+        
+        // Get previous step data
+        $previousContent = '';
+        foreach ($state['step_data'] as $prevStep => $prevData) {
+            if ($prevStep !== $stepName && isset($prevData['content'])) {
+                $previousContent = $prevData['content'];
+                break;
+            }
+        }
+        
+        if (empty($previousContent)) {
+            return [];
+        }
+        
+        // Detect specific field conflicts based on step type
+        $conflicts = match($stepName) {
+            'company_basics' => $this->detectBasicInfoConflicts($currentContent, $previousContent),
+            'financial' => $this->detectFinancialConflicts($currentContent, $previousContent),
+            'products_tech' => $this->detectProductConflicts($currentContent, $previousContent),
+            'competitors' => $this->detectCompetitorConflicts($currentContent, $previousContent),
+            default => []
+        };
+        
+        return $conflicts;
+    }
+    
+    private function detectBasicInfoConflicts(string $current, string $previous): array
+    {
+        $conflicts = [];
+        
+        // Extract employee count
+        $currentEmp = $this->extractEmployeeCount($current);
+        $previousEmp = $this->extractEmployeeCount($previous);
+        
+        if ($currentEmp && $previousEmp && abs($currentEmp - $previousEmp) / max($currentEmp, $previousEmp) > 0.1) {
+            $conflicts[] = [
+                'field' => 'employees',
+                'question' => "I'm seeing two employee counts for this company:",
+                'values' => [
+                    ['label' => number_format($currentEmp) . ' employees', 'value' => $currentEmp],
+                    ['label' => number_format($previousEmp) . ' employees', 'value' => $previousEmp]
+                ],
+                'current' => $current,
+                'previous' => $previous
+            ];
+        }
+        
+        // Extract headquarters
+        $currentHQ = $this->extractHeadquarters($current);
+        $previousHQ = $this->extractHeadquarters($previous);
+        
+        if ($currentHQ && $previousHQ && $currentHQ !== $previousHQ) {
+            $conflicts[] = [
+                'field' => 'headquarters',
+                'question' => "Two different headquarters are listed:",
+                'values' => [
+                    ['label' => $currentHQ, 'value' => $currentHQ],
+                    ['label' => $previousHQ, 'value' => $previousHQ]
+                ],
+                'current' => $current,
+                'previous' => $previous
+            ];
+        }
+        
+        return $conflicts;
+    }
+    
+    private function detectFinancialConflicts(string $current, string $previous): array
+    {
+        $conflicts = [];
+        
+        // Extract revenue
+        $currentRev = $this->extractRevenue($current);
+        $previousRev = $this->extractRevenue($previous);
+        
+        if ($currentRev && $previousRev && abs($currentRev['amount'] - $previousRev['amount']) / max($currentRev['amount'], $previousRev['amount']) > 0.1) {
+            $conflicts[] = [
+                'field' => 'revenue',
+                'question' => "I found two different revenue figures:",
+                'values' => [
+                    ['label' => $currentRev['label'], 'value' => $currentRev['amount']],
+                    ['label' => $previousRev['label'], 'value' => $previousRev['amount']]
+                ],
+                'current' => $current,
+                'previous' => $previous
+            ];
+        }
+        
+        return $conflicts;
+    }
+    
+    private function detectProductConflicts(string $current, string $previous): array
+    {
+        // For now, skip product conflicts as they're more subjective
+        return [];
+    }
+    
+    private function detectCompetitorConflicts(string $current, string $previous): array
+    {
+        // For now, skip competitor conflicts as they're more subjective  
+        return [];
+    }
+    
+    // REMOVED OLD LOGIC BELOW
+    private function oldDetectMethod_unused(array $data, string $stepName, array $state): array
+    {
+        $conflicts = [];
         // Compare numeric values (3% threshold)
         foreach ($data as $key => $value) {
             // Skip arrays and objects
@@ -2068,6 +2254,57 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         return $conflicts;
     }
     
+    private function extractEmployeeCount(string $text): ?int
+    {
+        // Match patterns like: 23,652, 1,900 employees, 5000 staff
+        if (preg_match('/(\d{1,3}(?:,\d{3})*|\d+)\s*(?:employees|staff|people|workforce)/i', $text, $matches)) {
+            return (int)str_replace(',', '', $matches[1]);
+        }
+        return null;
+    }
+    
+    private function extractHeadquarters(string $text): ?string
+    {
+        // Match patterns like: Headquarters: Mumbai, Headquartered in Noida
+        if (preg_match('/headquarters?[:\s]+([^\n\r\.;]+)/i', $text, $matches)) {
+            return trim($matches[1]);
+        }
+        if (preg_match('/headquartered in ([^\n\r\.;]+)/i', $text, $matches)) {
+            return trim($matches[1]);
+        }
+        return null;
+    }
+    
+    private function extractRevenue(string $text): ?array
+    {
+        // Match patterns like: $14.2 billion, 7,800 Cr, ₹5,197 crore, $120M
+        $patterns = [
+            '/([\\$₹]?\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(billion|million|crore|cr|b|m)/i',
+            '/revenue[:\s]+([\\$₹]?\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(billion|million|crore|cr|b|m)/i'
+        ];
+        
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $text, $matches)) {
+                $amount = (float)str_replace([',', '$', '₹'], '', $matches[1]);
+                $unit = strtolower($matches[2]);
+                
+                // Normalize to base amount
+                $multiplier = match($unit) {
+                    'billion', 'b' => 1000000000,
+                    'million', 'm' => 1000000,
+                    'crore', 'cr' => 10000000,
+                    default => 1
+                };
+                
+                return [
+                    'amount' => $amount * $multiplier,
+                    'label' => trim($matches[0])
+                ];
+            }
+        }
+        return null;
+    }
+    
     private function parseNumericValue($value): float
     {
         // Handle null or array values
@@ -2106,24 +2343,19 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     
     private function formatConflicts(array $conflicts): string
     {
-        $formatted = 'Found differing information:\n\n';
-        
-        foreach ($conflicts as $i => $conflict) {
-            $formatted .= ($i + 1) . ". ";
-            
-            // Extract first key phrase (up to 50 chars) from current
-            $current = $conflict['current'];
-            $currentSummary = $this->summarizeText($current, 50);
-            
-            // Extract first key phrase (up to 50 chars) from previous  
-            $previous = $conflict['previous'];
-            $previousSummary = $this->summarizeText($previous, 50);
-            
-            $formatted .= "Option A: {$currentSummary}\n";
-            $formatted .= "   Option B: {$previousSummary}\n\n";
+        if (empty($conflicts)) {
+            return 'Found differing information.';
         }
         
-        $formatted .= 'Choose which version:';
+        $conflict = $conflicts[0]; // Handle first conflict only
+        
+        $formatted = $conflict['question'] . "\n";
+        
+        foreach ($conflict['values'] as $value) {
+            $formatted .= "• " . $value['label'] . "\n";
+        }
+        
+        $formatted .= "\nWhich value should I use?";
         
         return $formatted;
     }
@@ -2153,29 +2385,101 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
     
     private function createConflictButtons(array $conflicts): array
     {
-        $buttons = [];
+        if (empty($conflicts)) {
+            return [];
+        }
         
-        foreach ($conflicts as $i => $conflict) {
-            // Create concise button labels
-            $currentLabel = $this->summarizeText($conflict['current'], 40);
-            $previousLabel = $this->summarizeText($conflict['previous'], 40);
-            
+        $buttons = [];
+        $conflict = $conflicts[0]; // Handle first conflict only
+        
+        // Add value selection buttons
+        foreach ($conflict['values'] as $i => $value) {
             $buttons[] = [
-                'text' => "Option A: {$currentLabel}",
-                'value' => "conflict_{$i}_current"
-            ];
-            $buttons[] = [
-                'text' => "Option B: {$previousLabel}",
-                'value' => "conflict_{$i}_previous"
+                'text' => "Use " . $value['label'],
+                'value' => "conflict_0_value_{$i}"
             ];
         }
+        
+        // Add utility buttons
+        $buttons[] = [
+            'text' => "Verify official source",
+            'value' => "conflict_0_verify"
+        ];
+        
+        $buttons[] = [
+            'text' => "Skip this field",
+            'value' => "conflict_0_skip"
+        ];
         
         return $buttons;
     }
     
     private function handleConflictResolution(string $sessionId, string $userMessage, array $state): array
     {
-        // Parse conflict decision
+        // Parse conflict decision - new format: conflict_0_value_0, conflict_0_verify, conflict_0_skip
+        if (preg_match('/conflict_(\d+)_(value_(\d+)|verify|skip)/', $userMessage, $matches)) {
+            $conflictIndex = (int)$matches[1];
+            $action = $matches[2];
+            
+            $conflict = $state['pending_conflicts'][$conflictIndex] ?? null;
+            
+            if ($conflict) {
+                // Handle different actions
+                if (str_starts_with($action, 'value_')) {
+                    // User selected a specific value
+                    $valueIndex = (int)$matches[3];
+                    $chosenValue = $conflict['values'][$valueIndex] ?? null;
+                    
+                    if ($chosenValue) {
+                        // Update data with chosen value
+                        $state['step_data'][$state['current_step']]['content'] = $chosenValue['value'];
+                        
+                        // Mark conflict as resolved
+                        if (!isset($state['conflicts_asked'])) {
+                            $state['conflicts_asked'] = [];
+                        }
+                        $state['conflicts_asked'][$state['current_step']] = true;
+                        
+                        // Clear pending conflicts
+                        unset($state['pending_conflicts']);
+                        
+                        // Save and continue
+                        $this->saveSessionState($sessionId, $state);
+                        $this->updatePlanSection($sessionId, $state['current_step'], $state['step_data'][$state['current_step']]);
+                        
+                        return [[
+                            'type' => 'update_plan',
+                            'step' => $state['current_step']
+                        ], [
+                            'type' => 'message',
+                            'content' => "Updated with selected value. Ready for next step?"
+                        ]];
+                    }
+                } elseif ($action === 'verify') {
+                    // User wants to verify - do deeper research
+                    return [[
+                        'type' => 'message',
+                        'content' => "I'll do deeper research to verify this information."
+                    ]];
+                } elseif ($action === 'skip') {
+                    // User wants to skip this field
+                    if (!isset($state['conflicts_asked'])) {
+                        $state['conflicts_asked'] = [];
+                    }
+                    $state['conflicts_asked'][$state['current_step']] = true;
+                    unset($state['pending_conflicts']);
+                    
+                    $this->saveSessionState($sessionId, $state);
+                    
+                    return [[
+                        'type' => 'message',
+                        'content' => "Skipped conflict. Ready for next step?"
+                    ]];
+                }
+            }
+        }
+        
+        // Fallback for old format compatibility
         if (preg_match('/conflict_(\d+)_(current|previous)/', $userMessage, $matches)) {
             $conflictIndex = (int)$matches[1];
             $choice = $matches[2];
