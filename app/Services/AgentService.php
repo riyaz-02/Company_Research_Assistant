@@ -43,26 +43,80 @@ class AgentService
         
         // Check if this is step-by-step mode
         $state = $this->getSessionState($sessionId);
-        
+
         Log::info('Processing message', [
             'step_mode' => $state['step_mode'],
-            'is_research' => $this->isResearchRequest($userMessage),
+            'current_step' => $state['current_step'] ?? 'none',
             'message' => $userMessage
         ]);
+
+        // CRITICAL: Classify intent BEFORE doing anything else
+        $intent = $this->classifyIntent($userMessage, $state);
         
-        // If not in step mode and this is a research request, enter step mode
-        if (!$state['step_mode'] && $this->isResearchRequest($userMessage)) {
-            Log::info('Starting step-by-step research');
-            return $this->startStepByStepResearch($sessionId, $userMessage);
+        Log::info('Intent classified', [
+            'intent' => $intent['intent'],
+            'company_extracted' => $intent['company_extracted'] ?? '',
+            'confidence' => $intent['confidence'] ?? 'unknown'
+        ]);
+        
+        // Handle different intents
+        switch ($intent['intent']) {
+            case 'off_topic_personal':
+                // User talking about health, feelings, personal matters
+                return $this->handlePersonalMessage($sessionId, $userMessage);
+                
+            case 'off_topic_general':
+                // General questions not about research
+                return $this->handleGeneralQuestion($sessionId, $userMessage);
+                
+            case 'change_company':
+                // User wants to switch company
+                return $this->handleChangeCompany($sessionId);
+                
+            case 'request_help':
+                // User is confused
+                return $this->handleHelpRequest($sessionId);
+                
+            case 'reject':
+                // User wants to stop
+                return $this->handleStopRequest($sessionId, $state);
+                
+            case 'start_research':
+                // User wants to start research on a company
+                $companyName = $intent['company_extracted'] ?? $this->extractCompanyName($userMessage);
+                if (empty($companyName)) {
+                    return [[
+                        'type' => 'message',
+                        'content' => 'Sure! Which company would you like me to research?'
+                    ]];
+                }
+                return $this->startStepByStepResearch($sessionId, $companyName);
+                
+            case 'continue_research':
+                // User wants to continue/proceed
+                if ($state['step_mode']) {
+                    return $this->processStepResponse($sessionId, $userMessage, $state);
+                } else {
+                    return [[
+                        'type' => 'message',
+                        'content' => "I don't have an active research session. Which company would you like me to research?"
+                    ]];
+                }
+                
+            case 'unclear':
+            default:
+                // If in step mode, let agentic AI handle it
+                if ($state['step_mode']) {
+                    return $this->processStepResponse($sessionId, $userMessage, $state);
+                }
+                
+                // Otherwise ask for clarification
+                return [[
+                    'type' => 'message',
+                    'content' => "I'm not quite sure what you'd like me to do. You can:\n• Start a company research (just tell me the company name)\n• Ask me questions about company research\n• Request help if you're not sure what to do"
+                ]];
         }
-        
-        // If in step mode, process step-by-step response
-        if ($state['step_mode']) {
-            Log::info('Processing step response', ['current_step' => $state['current_step']]);
-            return $this->processStepResponse($sessionId, $userMessage, $state);
-        }
-        
-        // Try to extract company name from user message
+    }        // Try to extract company name from user message
         $this->extractAndSetCompanyName($sessionId, $userMessage);
 
         $responses = [];
@@ -1322,6 +1376,164 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         Cache::put("agent_state_{$sessionId}", $state, now()->addHours(2));
     }
     
+    /**
+     * Classify user intent using Gemini AI
+     * Returns: ['intent' => string, 'company_extracted' => string, 'confidence' => string]
+     */
+    private function classifyIntent(string $userMessage, array $state): array
+    {
+        // Use AI Service to classify intent
+        try {
+            $result = $this->aiServiceClient->interpretIntent($userMessage, [
+                'step_mode' => $state['step_mode'],
+                'current_step' => $state['current_step'] ?? 'none',
+                'company_name' => $state['company_name'] ?? ''
+            ]);
+            
+            return $result;
+            
+        } catch (\Exception $e) {
+            Log::error('Intent classification failed', ['error' => $e->getMessage()]);
+            
+            // Fallback to basic rules
+            return $this->basicIntentClassification($userMessage, $state);
+        }
+    }
+    
+    /**
+     * Basic fallback intent classification
+     */
+    private function basicIntentClassification(string $userMessage, array $state): array
+    {
+        $lower = strtolower(trim($userMessage));
+        
+        // Personal/health messages
+        $personalWords = ['feel', 'feeling', 'sick', 'ill', 'tired', 'health', 'unwell', 'pain', 'hurt'];
+        foreach ($personalWords as $word) {
+            if (strpos($lower, $word) !== false) {
+                return ['intent' => 'off_topic_personal', 'company_extracted' => ''];
+            }
+        }
+        
+        // Change company
+        if (preg_match('/\b(change|switch|different)\s+(company|name)\b/i', $lower)) {
+            return ['intent' => 'change_company', 'company_extracted' => ''];
+        }
+        
+        // Continue/proceed
+        $continueWords = ['continue', 'proceed', 'go ahead', 'next', 'yes', 'ok', 'okay', 'sure'];
+        if (in_array($lower, $continueWords) || preg_match('/\b(yes|ok|sure)\s+(continue|proceed)\b/i', $lower)) {
+            return ['intent' => 'continue_research', 'company_extracted' => ''];
+        }
+        
+        // Stop/reject
+        $stopWords = ['stop', 'halt', 'pause', 'cancel', 'quit', 'no'];
+        if (in_array($lower, $stopWords)) {
+            return ['intent' => 'reject', 'company_extracted' => ''];
+        }
+        
+        // Help request
+        if (preg_match('/\b(help|how|what.*do|confused|don\'?t understand)\b/i', $lower)) {
+            return ['intent' => 'request_help', 'company_extracted' => ''];
+        }
+        
+        // Research keywords
+        if (preg_match('/\b(research|analyze|study|investigate|tell me about|info about)\s+(.+)/i', $userMessage, $matches)) {
+            return ['intent' => 'start_research', 'company_extracted' => trim($matches[2])];
+        }
+        
+        // If in step mode, probably continuing
+        if ($state['step_mode']) {
+            return ['intent' => 'continue_research', 'company_extracted' => ''];
+        }
+        
+        // Otherwise might be a company name
+        $words = str_word_count($userMessage, 1);
+        if (count($words) >= 1 && count($words) <= 5) {
+            // Short phrase, might be company name
+            return ['intent' => 'start_research', 'company_extracted' => trim($userMessage)];
+        }
+        
+        return ['intent' => 'unclear', 'company_extracted' => ''];
+    }
+    
+    /**
+     * Handle personal/emotional messages
+     */
+    private function handlePersonalMessage(string $sessionId, string $userMessage): array
+    {
+        return [[
+            'type' => 'message',
+            'content' => "I'm sorry to hear that. Take your time, and whenever you're ready, just let me know which company you'd like me to research or if you'd like to continue with the current research."
+        ]];
+    }
+    
+    /**
+     * Handle general off-topic questions
+     */
+    private function handleGeneralQuestion(string $sessionId, string $userMessage): array
+    {
+        // Let agentic AI handle it naturally
+        return [[
+            'type' => 'message',
+            'content' => "I'm here to help with company research. Would you like me to research a specific company or continue with what we were working on?"
+        ]];
+    }
+    
+    /**
+     * Handle change company request
+     */
+    private function handleChangeCompany(string $sessionId): array
+    {
+        // Clear current state
+        $this->clearSessionState($sessionId);
+        
+        return [[
+            'type' => 'message',
+            'content' => "Sure! Which company would you like me to research instead?"
+        ]];
+    }
+    
+    /**
+     * Handle help request
+     */
+    private function handleHelpRequest(string $sessionId): array
+    {
+        return [[
+            'type' => 'message',
+            'content' => "I can help you research any company! Just tell me the company name (like 'Google', 'Tesla', or 'Microsoft') and I'll gather information about them. You can ask me about their:\n\n• Business overview\n• Financial performance\n• Products and services\n• Competitors\n• Anything else you're curious about\n\nWhat company would you like to explore?"
+        ]];
+    }
+    
+    /**
+     * Handle stop/reject request
+     */
+    private function handleStopRequest(string $sessionId, array $state): array
+    {
+        if ($state['step_mode']) {
+            $state['step_mode'] = false;
+            $this->saveSessionState($sessionId, $state);
+            
+            return [[
+                'type' => 'message',
+                'content' => "Research paused. Let me know if you'd like to continue later or start researching a different company."
+            ]];
+        }
+        
+        return [[
+            'type' => 'message',
+            'content' => "No problem. Let me know when you'd like to start a company research!"
+        ]];
+    }
+    
+    /**
+     * Clear session state
+     */
+    private function clearSessionState(string $sessionId): void
+    {
+        Cache::forget("agent_state_{$sessionId}");
+    }
+    
     private function isResearchRequest(string $message): bool
     {
         $researchKeywords = ['research', 'analyze', 'account plan', 'company', 'investigate', 'explore', 'create', 'generate'];
@@ -1387,201 +1599,347 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
         $this->saveSessionState($sessionId, $state);
         
         Log::info('Starting research for company', ['company' => $companyName, 'session' => $sessionId]);
-        
-        // Start first step
-        $stepResponses = $this->performStep($sessionId, 'company_basics', $state);
-        
-        Log::info('Step responses', ['count' => count($stepResponses), 'responses' => $stepResponses]);
-        
+
+        // Start with greeting message - let agentic AI handle the rest
         return [[
             'type' => 'message',
-            'content' => "Great! I'll research {$companyName} step by step. Let's start with the basics."
-        ], [
-            'type' => 'progress',
-            'message' => 'Step 1/7: Researching company basics...'
-        ], ...$stepResponses];
+            'content' => "Great! I can help you research {$companyName}. What would you like to know? I can provide information about their business overview, financials, products, competitors, or anything else you're curious about."
+        ]];
     }
     
     private function processStepResponse(string $sessionId, string $userMessage, array $state): array
     {
-        $lowerMessage = strtolower(trim($userMessage));
-
-        // Detect user intent using natural language understanding
-        $intent = $this->detectUserIntent($userMessage);
+        // Prepare context for the fully autonomous AI agent
+        $currentStep = $state['current_step'] ?? 'unknown';
+        $stepData = $state['step_data'][$currentStep] ?? [];
+        $lastContent = $stepData['content'] ?? 'No data yet';
         
-        Log::info('Processing step response', [
-            'message' => $userMessage,
-            'detected_intent' => $intent,
-            'current_step' => $state['current_step'] ?? 'unknown'
-        ]);
-
-        // Handle retry synthesis
-        if ($intent === 'retry_synthesis') {
-            return $this->handleRetrySynthesis($sessionId, $state);
+        // Get conversation history
+        $history = $this->memoryService->getRecentMessages($sessionId, 10);
+        $conversationHistory = array_map(function($msg) {
+            return [
+                'role' => $msg['role'],
+                'content' => $msg['content']
+            ];
+        }, $history);
+        
+        // Get research progress
+        $researchProgress = [];
+        foreach ($state['step_data'] as $step => $data) {
+            $researchProgress[$step] = [
+                'completed' => !empty($data['content']),
+                'content_length' => strlen($data['content'] ?? '')
+            ];
         }
-
-        // Handle clear intents (yes/no/next/deep research)
-        if (in_array($intent, ['yes', 'no', 'next step', 'deep research'])) {
-            return $this->handleStepDecision($sessionId, $intent, $state);
-        }
-
-        // Handle conflict resolution
-        if (isset($state['pending_conflicts']) && !empty($state['pending_conflicts'])) {
-            return $this->handleConflictResolution($sessionId, $userMessage, $state);
-        }
-
-        // Graceful fallback for unclear responses
-        if ($intent === null) {
-            $currentStep = $state['current_step'] ?? 'this step';
-            $stepName = ucwords(str_replace('_', ' ', $currentStep));
+        
+        // Build comprehensive context for the AI agent
+        $context = [
+            'current_step' => $currentStep,
+            'last_content' => $lastContent,
+            'conversation_history' => $conversationHistory,
+            'company_name' => $state['company_name'] ?? 'the company',
+            'research_progress' => $researchProgress,
+            'completed_steps' => count(array_filter($state['step_data'], fn($data) => !empty($data['content'])))
+        ];
+        
+        try {
+            // Call the fully agentic AI conversation endpoint
+            $decision = $this->aiServiceClient->agenticConversation($userMessage, $sessionId, $context);
             
+            if (!$decision) {
+                throw new \Exception('No response from agentic AI');
+            }
+            
+            $action = $decision['action'] ?? 'chat';
+            $response = $decision['response'] ?? '';
+            $shouldProceed = $decision['should_proceed'] ?? false;
+            $reasoning = $decision['reasoning'] ?? '';
+            
+            Log::info('Agentic AI decision', [
+                'user_message' => $userMessage,
+                'action' => $action,
+                'reasoning' => $reasoning,
+                'should_proceed' => $shouldProceed
+            ]);
+            
+            // The AI's response is ALWAYS shown to the user first
+            if ($response) {
+                $this->memoryService->addMessage($sessionId, 'assistant', $response);
+            }
+            
+            // If the AI decided to take action, execute it
+            if ($shouldProceed) {
+                switch ($action) {
+                    case 'continue':
+                        // Actually perform the research step
+                        return $this->executeResearchStep($sessionId, $state);
+                        
+                    case 'deep_research':
+                        return $this->executeDeepResearch($sessionId, $state);
+                        
+                    case 'next_step':
+                        return $this->skipToNextStep($sessionId, $state);
+                        
+                    case 'retry':
+                        return $this->retryCurrentStep($sessionId, $state);
+                        
+                    case 'stop':
+                        return $this->stopResearch($sessionId, $state);
+                }
+            }
+            
+            // Otherwise, just return the AI's conversational response
             return [[
-                'type' => 'ask_user',
-                'content' => "I'd love to help you with {$stepName}, but I'm not quite sure what you'd like me to do. Here are your options:\n\n" .
-                            "• **Continue** - Move to the next research step\n" .
-                            "• **Deep Research** - Gather more detailed information on this topic\n" .
-                            "• **Next Step** - Skip to the next section\n" .
-                            "• **Retry** - Regenerate the current analysis\n\n" .
-                            "Just let me know what works best!",
-                'buttons' => [
-                    ['text' => 'Yes, Continue', 'value' => 'yes'],
-                    ['text' => 'Deep Research', 'value' => 'deep research'],
-                    ['text' => 'Next Step', 'value' => 'next step']
-                ]
+                'type' => 'message',
+                'content' => $response ?: "I understand. What would you like to do next?"
+            ]];
+            
+        } catch (\Exception $e) {
+            Log::error('Agentic AI conversation failed', [
+                'error' => $e->getMessage(),
+                'user_message' => $userMessage
+            ]);
+            
+            // Fallback: minimal prompt for clarification
+            return [[
+                'type' => 'message',
+                'content' => "I apologize, I'm having a bit of difficulty right now. Could you let me know what you'd like to do next?"
             ]];
         }
-
-        // Final fallback (shouldn't reach here often)
-        return [[
-            'type' => 'message',
-            'content' => 'I need a clear response. Please use the buttons provided or clarify your request.'
-        ]];
-    }    private function handleRetrySynthesis(string $sessionId, array $state): array
-    {
-        $stepName = $state['current_step'];
-        
-        Log::info('Retrying synthesis for step', ['step' => $stepName]);
-        
-        // Clear Gemini cache for this step to force fresh API call
-        $stepData = $state['step_data'][$stepName] ?? [];
-        if (isset($stepData['content'])) {
-            $cacheKey = 'gemini_' . md5($stepData['content']);
-            Cache::forget($cacheKey);
-        }
-        
-        // Re-perform the step (will reuse cached search results)
-        return [[
-            'type' => 'message',
-            'content' => 'Retrying synthesis with fresh API call...'
-        ], ...$this->performStep($sessionId, $stepName, $state)];
     }
-    
+
+    /**
+     * Perform a research step (simplified for agentic mode)
+     * Returns progress messages for the step
+     */
     private function performStep(string $sessionId, string $stepName, array $state): array
     {
         $stepConfig = $this->getStepConfig($stepName);
         
+        return [[
+            'type' => 'progress',
+            'message' => $stepConfig['progress_message'] ?? "Processing {$stepName}..."
+        ], [
+            'type' => 'message',
+            'content' => "I'm ready to gather information for this step. Would you like me to proceed?"
+        ]];
+    }
+    
+    /**
+     * Handle retry synthesis request (simplified for agentic mode)
+     */
+    private function handleRetrySynthesis(string $sessionId, array $state): array
+    {
+        $currentStep = $state['current_step'];
+        $stepName = ucwords(str_replace('_', ' ', $currentStep));
+        
+        return [[
+            'type' => 'progress',
+            'message' => "Regenerating {$stepName}..."
+        ], [
+            'type' => 'message',
+            'content' => "I'll regenerate the analysis for {$stepName}. Give me a moment..."
+        ]];
+    }
+
+    /**
+     * Execute the current research step - actually performs the search and synthesis
+     */
+    private function executeResearchStep(string $sessionId, array $state): array
+    {
+        $currentStep = $state['current_step'] ?? 'company_basics';
+        $companyName = $state['company_name'] ?? 'the company';
+        
+        Log::info('Executing research step', ['step' => $currentStep, 'company' => $companyName]);
+        
+        // Get step configuration
+        $stepConfig = $this->getStepConfig($currentStep);
+        
         // Show progress
-        $responses = [];
+        $responses = [[
+            'type' => 'progress',
+            'message' => $stepConfig['progress_message'] ?? "Researching {$currentStep}..."
+        ]];
         
-        // Perform search if needed
-        if ($stepConfig['use_search']) {
-            $searchQuery = str_replace('{company}', $state['company_name'], $stepConfig['search_query']);
-            $searchResults = $this->researchService->search($searchQuery);
-            
-            // Check if search results are sufficient
-            if (empty($searchResults) || count($searchResults) < 2) {
-                // Insufficient results - offer fallback
-                $state['step_data'][$stepName] = [
-                    'content' => 'Insufficient data found from initial search.'
+        try {
+            // Perform search if needed
+            if ($stepConfig['use_search']) {
+                $query = str_replace('{company}', $companyName, $stepConfig['search_query']);
+                Log::info('Performing search', ['query' => $query]);
+                
+                $searchResults = $this->researchService->search($query);
+                
+                // Synthesize the results using AI service
+                $synthesis = $this->aiServiceClient->synthesizeSection(
+                    $sessionId,
+                    $currentStep,
+                    $searchResults,
+                    $companyName
+                );
+                
+                // Store in state (for later use when user requests to add to plan)
+                $state['step_data'][$currentStep] = [
+                    'content' => $synthesis['content'] ?? '',
+                    'evidence' => $synthesis['evidence'] ?? [],
+                    'completed' => true
                 ];
                 $this->saveSessionState($sessionId, $state);
                 
-                return [[
-                    'type' => 'ask_user',
-                    'content' => "No reliable data found for this step. Would you like me to try deeper research?",
-                    'buttons' => [
-                        ['text' => 'Deep Research', 'value' => 'deep research'],
-                        ['text' => 'Skip', 'value' => 'next step'],
-                        ['text' => 'Stop', 'value' => 'stop']
-                    ]
-                ]];
+                // DON'T update plan automatically - just show in chat
+                // User will explicitly request to add to plan later
+                
+                $responses[] = [
+                    'type' => 'message',
+                    'content' => $synthesis['content'] ?? 'Research completed'
+                ];
             }
             
-            // Extract and format data
-            $data = $this->extractStepData($searchResults, $stepName);
+            // Mark step as complete
+            $state['completed_steps'][] = $currentStep;
             
-            // Verify data was extracted
-            if (empty($data) || (isset($data['content']) && empty(trim($data['content'])))) {
-                // Data extraction failed - offer fallback
-                $state['step_data'][$stepName] = [
-                    'content' => 'Unable to extract meaningful data from search results.'
-                ];
+            // Check if there's a next step
+            $nextStep = $this->getNextStep($currentStep);
+            
+            if (!$nextStep) {
+                // All steps complete
+                $state['current_step'] = 'ready_for_final';
                 $this->saveSessionState($sessionId, $state);
                 
-                return [[
-                    'type' => 'ask_user',
-                    'content' => "Data extraction incomplete. Would you like to try deeper research?",
-                    'buttons' => [
-                        ['text' => 'Deep Research', 'value' => 'deep research'],
-                        ['text' => 'Skip', 'value' => 'next step'],
-                        ['text' => 'Stop', 'value' => 'stop']
-                    ]
-                ]];
+                $responses[] = [
+                    'type' => 'message',
+                    'content' => "I've gathered all the research data. " . str_replace('{company}', $companyName, $stepConfig['confirmation_message'] ?? "What would you like to do next?")
+                ];
+            } else {
+                // Update to next step but DON'T execute it - wait for user
+                $state['current_step'] = $nextStep;
+                $this->saveSessionState($sessionId, $state);
+                
+                $confirmMsg = str_replace('{company}', $companyName, $stepConfig['confirmation_message'] ?? "Ready to continue?");
+                $responses[] = [
+                    'type' => 'message',
+                    'content' => $confirmMsg
+                ];
             }
             
-            $state['step_data'][$stepName] = $data;
-        } else {
-            // Use Gemini for analysis
-            $prompt = str_replace('{company}', $state['company_name'], $stepConfig['prompt']);
-            $context = $this->buildContextForStep($state);
-            $data = $this->analyzeWithGemini($prompt, $context);
-            $state['step_data'][$stepName] = $data;
+            return $responses;
+            
+        } catch (\Exception $e) {
+            Log::error('Research step execution failed', [
+                'step' => $currentStep,
+                'error' => $e->getMessage()
+            ]);
+            
+            return [[
+                'type' => 'message',
+                'content' => "I encountered an issue while researching {$currentStep}. Would you like me to try again?"
+            ]];
         }
+    }
+    
+    /**
+     * Execute deep research - more detailed analysis of current step
+     */
+    private function executeDeepResearch(string $sessionId, array $state): array
+    {
+        $currentStep = $state['current_step'];
+        $companyName = $state['company_name'];
         
-        // Check for conflicts
-        $conflicts = $this->detectConflicts($state['step_data'][$stepName], $stepName, $state);
+        Log::info('Executing deep research', ['step' => $currentStep]);
         
-        if (!empty($conflicts)) {
-            $state['pending_conflicts'] = $conflicts;
+        $stepConfig = $this->getStepConfig($currentStep);
+        $deepQuery = $stepConfig['search_query'] . ' detailed analysis trends';
+        $deepQuery = str_replace('{company}', $companyName, $deepQuery);
+        
+        try {
+            $searchResults = $this->researchService->search($deepQuery);
+            
+            $synthesis = $this->aiServiceClient->synthesizeSection(
+                $sessionId,
+                $currentStep . '_deep',
+                $searchResults,
+                $companyName
+            );
+            
+            // Append to existing content
+            $existingContent = $state['step_data'][$currentStep]['content'] ?? '';
+            $state['step_data'][$currentStep]['content'] = $existingContent . "\n\n" . ($synthesis['content'] ?? '');
             $this->saveSessionState($sessionId, $state);
             
             return [[
-                'type' => 'ask_user',
-                'content' => "I found some conflicting information:\n\n" . $this->formatConflicts($conflicts),
-                'buttons' => $this->createConflictButtons($conflicts)
+                'type' => 'message',
+                'content' => "I've gathered additional detailed information. " . ($stepConfig['confirmation_message'] ?? "Ready to continue?")
+            ]];
+            
+        } catch (\Exception $e) {
+            Log::error('Deep research failed', ['error' => $e->getMessage()]);
+            return [[
+                'type' => 'message',
+                'content' => "I had trouble gathering more details. Should I move on to the next section?"
+            ]];
+        }
+    }
+    
+    /**
+     * Skip to next step without completing current one
+     */
+    private function skipToNextStep(string $sessionId, array $state): array
+    {
+        $currentStep = $state['current_step'];
+        $state['completed_steps'][] = $currentStep;
+        
+        $nextStep = $this->getNextStep($currentStep);
+        
+        if (!$nextStep) {
+            $state['step_mode'] = false;
+            $this->saveSessionState($sessionId, $state);
+            
+            return [[
+                'type' => 'finish',
+                'content' => "Research complete!"
             ]];
         }
         
-        // Update plan
-        $this->updatePlanSection($sessionId, $stepName, $state['step_data'][$stepName]);
-        
-        // Ask for confirmation
-        $responses[] = [
-            'type' => 'update_plan',
-            'section' => $stepConfig['section'],
-            'content' => $this->formatStepData($state['step_data'][$stepName], $stepName)
-        ];
-        
-        // Check if synthesis failed and add retry button
-        $buttons = [
-            ['text' => 'Yes, Continue', 'value' => 'yes'],
-            ['text' => 'Deep Research', 'value' => 'deep research'],
-            ['text' => 'Next Step', 'value' => 'next step']
-        ];
-        
-        if (isset($state['step_data'][$stepName]['needs_retry']) && $state['step_data'][$stepName]['needs_retry']) {
-            array_unshift($buttons, ['text' => '🔄 Retry Synthesis', 'value' => 'retry_synthesis']);
-        }
-        
-        $responses[] = [
-            'type' => 'ask_user',
-            'content' => $stepConfig['confirmation_message'],
-            'buttons' => $buttons
-        ];
-        
+        $state['current_step'] = $nextStep;
         $this->saveSessionState($sessionId, $state);
         
-        return $responses;
+        $stepNum = count($state['completed_steps']) + 1;
+        $nextStepConfig = $this->getStepConfig($nextStep);
+        
+        return [[
+            'type' => 'progress',
+            'message' => "Step {$stepNum}/7: " . ($nextStepConfig['progress_message'] ?? "Processing {$nextStep}")
+        ], [
+            'type' => 'message',
+            'content' => "Skipped to next step. Ready to continue?"
+        ]];
+    }
+    
+    /**
+     * Retry current step
+     */
+    private function retryCurrentStep(string $sessionId, array $state): array
+    {
+        // Clear current step data
+        $currentStep = $state['current_step'];
+        unset($state['step_data'][$currentStep]);
+        $this->saveSessionState($sessionId, $state);
+        
+        // Execute the step again
+        return $this->executeResearchStep($sessionId, $state);
+    }
+    
+    /**
+     * Stop the research workflow
+     */
+    private function stopResearch(string $sessionId, array $state): array
+    {
+        $state['step_mode'] = false;
+        $this->saveSessionState($sessionId, $state);
+        
+        return [[
+            'type' => 'message',
+            'content' => "Research stopped. You can review the data collected so far in the Account Plan section."
+        ]];
     }
     
     private function handleStepDecision(string $sessionId, string $decision, array $state): array
@@ -1610,10 +1968,15 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             $this->saveSessionState($sessionId, $state);
 
             $stepNum = count($state['completed_steps']) + 1;
+            $nextStepName = $this->getStepConfig($nextStep)['progress_message'] ?? "Processing {$nextStep}";
+            
             return [[
                 'type' => 'progress',
-                'message' => "Step {$stepNum}/7: " . $this->getStepConfig($nextStep)['progress_message']
-            ], ...$this->performStep($sessionId, $nextStep, $state)];
+                'message' => "Step {$stepNum}/7: {$nextStepName}"
+            ], [
+                'type' => 'message',
+                'content' => "Moving to the next step. I'll gather the information now."
+            ]];
 
         } elseif ($decision === 'no') {
             // User wants to stop or modify current approach
@@ -1656,10 +2019,15 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
             $this->saveSessionState($sessionId, $state);
 
             $stepNum = count($state['completed_steps']) + 1;
+            $nextStepName = $this->getStepConfig($nextStep)['progress_message'] ?? "Processing {$nextStep}";
+            
             return [[
                 'type' => 'progress',
-                'message' => "Step {$stepNum}/7: " . $this->getStepConfig($nextStep)['progress_message']
-            ], ...$this->performStep($sessionId, $nextStep, $state)];
+                'message' => "Step {$stepNum}/7: {$nextStepName}"
+            ], [
+                'type' => 'message',
+                'content' => "Skipping to the next step. I'll gather the information now."
+            ]];
 
         } elseif ($decision === 'stop') {
             // User wants to stop research
@@ -1684,40 +2052,40 @@ YOUR GOAL: Create a comprehensive, evidence-based account plan covering all 39+ 
                 'use_search' => true,
                 'search_query' => '{company} company overview headquarters employees',
                 'prompt' => '',
-                'progress_message' => 'Researching company basics...',
-                'confirmation_message' => 'Here\'s what I found about the company basics. Should I continue to financial research?'
+                'progress_message' => 'Gathering company basics...',
+                'confirmation_message' => "Here's a quick overview of {company}. If you want, I can go deeper into the company's history, structure, and footprint. Would you like a more detailed overview, or should I move forward to financials?"
             ],
             'financial' => [
                 'section' => 'financial_overview',
                 'use_search' => true,
                 'search_query' => '{company} revenue funding valuation financial performance',
                 'prompt' => '',
-                'progress_message' => 'Analyzing financial data...',
-                'confirmation_message' => 'I\'ve gathered the financial information. Ready to explore products and technology?'
+                'progress_message' => 'Fetching financial performance details...',
+                'confirmation_message' => "Here's the financial overview. Should I move on to their products and technology?"
             ],
             'products_tech' => [
                 'section' => 'products_services',
                 'use_search' => true,
                 'search_query' => '{company} products services technology stack',
                 'prompt' => '',
-                'progress_message' => 'Researching products and technology...',
-                'confirmation_message' => 'Products and tech stack mapped. Should I analyze competitors next?'
+                'progress_message' => 'Summarizing product lines and technology...',
+                'confirmation_message' => "Here's their product and technology landscape. Would you like a deeper technical breakdown, or should we explore competitors?"
             ],
             'competitors' => [
                 'section' => 'competitive_landscape',
                 'use_search' => true,
-                'search_query' => '{company} competitors alternatives comparison',
+                'search_query' => '{company} competitors competitive landscape market position',
                 'prompt' => '',
-                'progress_message' => 'Identifying competitors...',
-                'confirmation_message' => 'Competitive landscape analyzed. Ready to identify pain points?'
+                'progress_message' => 'Gathering competitor information...',
+                'confirmation_message' => "Here are the major competitors. Shall we analyze pain points and opportunities next?"
             ],
             'pain_points' => [
                 'section' => 'pain_points',
                 'use_search' => false,
                 'search_query' => '',
                 'prompt' => 'Based on all the research data gathered for {company}, identify and synthesize key pain points, challenges, and business/technical obstacles.\n\nInstructions:\n- Analyze the company\'s financial situation, products, competitive position\n- Identify 3-5 main pain points or challenges\n- Be specific and actionable\n- Use bullet points for clarity with single line breaks between items\n- Write complete descriptions - do NOT use \'...\'\n- Maximum 250 words\n- Do not speculate; base insights on provided data',
-                'progress_message' => 'Analyzing pain points...',
-                'confirmation_message' => 'Pain points identified. Should I generate recommendations?'
+                'progress_message' => 'Analyzing pain points and opportunities...',
+                'confirmation_message' => "Here are the key pain points and opportunities I've identified. Would you like strategic recommendations next?"
             ],
             'recommendations' => [
                 'section' => 'recommendations',

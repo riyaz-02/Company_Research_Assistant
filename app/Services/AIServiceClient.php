@@ -130,6 +130,81 @@ class AIServiceClient
     }
 
     /**
+     * Interpret user intent using AI
+     * 
+     * Uses Gemini to naturally understand what the user wants to do
+     * Returns intent (yes/no/next_step/deep_research/retry_synthesis/unclear) with confidence
+     */
+    public function interpretUserIntent(string $userMessage, array $context, string $sessionId = 'default'): ?array
+    {
+        try {
+            return $this->makeRequest('/interpret-user-intent', [
+                'user_message' => $userMessage,
+                'context' => $context,
+                'session_id' => $sessionId,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('AI intent interpretation failed: ' . $e->getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Fully agentic AI conversation - handles ANY user message naturally
+     * This is the main method for human-like conversational interaction
+     */
+    public function agenticConversation(string $userMessage, string $sessionId, array $context): ?array
+    {
+        try {
+            return $this->makeRequest('/agentic-conversation', [
+                'user_message' => $userMessage,
+                'session_id' => $sessionId,
+                'context' => $context,
+            ], 'POST');
+        } catch (\Exception $e) {
+            Log::error('Agentic conversation failed', [
+                'error' => $e->getMessage(),
+                'user_message' => substr($userMessage, 0, 100)
+            ]);
+            return null;
+        }
+    }
+    
+    /**
+     * Interpret user intent before taking any action
+     * Returns: ['intent' => string, 'company_extracted' => string, 'confidence' => string]
+     */
+    public function interpretIntent(string $userMessage, array $context): array
+    {
+        try {
+            $result = $this->makeRequest('/interpret-user-intent', [
+                'user_message' => $userMessage,
+                'session_id' => $context['session_id'] ?? 'default',
+                'context' => $context,
+            ], 'POST');
+            
+            // Extract company_extracted from suggested_response field (Python stores it there)
+            $companyExtracted = $result['suggested_response'] ?? '';
+            
+            // Build proper return format
+            return [
+                'intent' => $result['intent'] ?? 'unclear',
+                'company_extracted' => $companyExtracted,
+                'confidence' => $result['confidence'] ?? 0.5,
+                'explanation' => $result['explanation'] ?? 'No explanation provided'
+            ];
+            
+        } catch (\Exception $e) {
+            Log::error('Intent interpretation failed', [
+                'error' => $e->getMessage(),
+                'user_message' => substr($userMessage, 0, 100)
+            ]);
+            // Return unclear intent on error
+            return ['intent' => 'unclear', 'company_extracted' => '', 'confidence' => 0.0];
+        }
+    }
+
+    /**
      * Check health of AI service
      */
     public function healthCheck(): array

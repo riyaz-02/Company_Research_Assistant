@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # Token Limits
     max_output_tokens: int = 2048
     max_input_tokens: int = 8000
+    max_snippet_length: int = 200
+    max_snippets_per_step: int = 3
     
     # Conflict Detection
     numeric_conflict_threshold: float = 0.1  # 10% difference

@@ -2,288 +2,77 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\AgentService;
-use App\Services\PlanService;
-use App\Services\MemoryService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
-use Illuminate\Support\Facades\Cache;
 
 class AgentController extends Controller
 {
-    private AgentService $agentService;
-    private PlanService $planService;
-    private MemoryService $memoryService;
+    private string $aiServiceUrl;
 
-    public function __construct(
-        AgentService $agentService,
-        PlanService $planService,
-        MemoryService $memoryService
-    ) {
-        $this->agentService = $agentService;
-        $this->planService = $planService;
-        $this->memoryService = $memoryService;
+    public function __construct()
+    {
+        $this->aiServiceUrl = config('services.ai_service.url', 'http://localhost:8001');
     }
 
-    /**
-     * Handle incoming message from user
-     */
     public function message(Request $request): JsonResponse
     {
-        $request->validate([
-            'message' => 'required|string|max:5000',
-            'session_id' => 'nullable|string',
-        ]);
-
-        $userMessage = $request->input('message');
-        $sessionId = $request->input('session_id') ?? $this->generateSessionId();
-
         try {
-            // Set a longer timeout for agent processing
-            set_time_limit(120); // 2 minutes for comprehensive research
+            // Increase PHP execution time for research operations  
+            set_time_limit(120);
             
-            $result = $this->agentService->processMessage($sessionId, $userMessage);
+            $sessionId = $request->input('session_id') ?: Str::uuid()->toString();
+            $userMessage = $request->input('message', '');
 
-            // Handle array responses (step-by-step mode)
-            if (is_array($result) && isset($result[0]['type'])) {
-                // Check if it's a step workflow session
-                $state = Cache::get("agent_state_{$sessionId}");
-                $isStepWorkflow = $state && isset($state['mode']) && $state['mode'] === 'step_workflow';
-                
-                // Format responses for frontend
-                $formattedResponses = $this->formatResponses($result);
-                
-                return response()->json([
-                    'success' => true,
-                    'session_id' => $sessionId,
-                    'responses' => $formattedResponses,
-                    'plan' => $isStepWorkflow 
-                        ? $this->planService->getStepSections($sessionId)
-                        : $this->planService->getPlanSections($sessionId),
-                    'is_step_workflow' => $isStepWorkflow,
-                ]);
-            }
-
-            // Handle legacy response format
-            if (empty($result['responses'])) {
+            if (empty($userMessage)) {
                 return response()->json([
                     'success' => false,
-                    'error' => 'No response generated. Please check your LLM API configuration.',
-                    'message' => 'The AI agent could not generate a response. This might be due to API configuration issues.',
-                ], 500);
+                    'error' => 'Message is required'
+                ], 400);
             }
 
-            return response()->json([
-                'success' => true,
+            Log::info('Processing user message', [
                 'session_id' => $sessionId,
-                'responses' => $result['responses'],
-                'plan' => $result['plan'],
+                'message' => $userMessage
             ]);
-        } catch (\Exception $e) {
-            \Log::error('AgentController error: ' . $e->getMessage() . "\n" . $e->getTraceAsString());
-            return response()->json([
-                'success' => false,
-                'error' => 'An error occurred while processing your message.',
-                'message' => $e->getMessage(),
-            ], 500);
-        }
-    }
-    
-    /**
-     * Format responses for frontend consumption
-     */
-    private function formatResponses(array $responses): array
-    {
-        $formatted = [];
-        
-        foreach ($responses as $response) {
-            $type = $response['type'] ?? 'message';
-            
-            switch ($type) {
-                case 'progress':
-                    $formatted[] = [
-                        'type' => 'progress',
-                        'message' => $response['message'] ?? 'Processing...'
-                    ];
-                    break;
-                    
-                case 'ask_user':
-                    $formatted[] = [
-                        'type' => 'ask_user',
-                        'content' => $response['content'] ?? '',
-                        'buttons' => $response['buttons'] ?? []
-                    ];
-                    break;
-                    
-                case 'update_plan':
-                    $formatted[] = [
-                        'type' => 'update_plan',
-                        'section' => $response['section'] ?? '',
-                        'content' => $response['content'] ?? ''
-                    ];
-                    break;
-                    
-                case 'message':
-                    $formatted[] = [
-                        'type' => 'message',
-                        'content' => $response['content'] ?? ''
-                    ];
-                    break;
-                    
-                case 'finish':
-                    $formatted[] = [
-                        'type' => 'finish',
-                        'content' => $response['content'] ?? 'Research complete!'
-                    ];
-                    break;
-                    
-                default:
-                    $formatted[] = $response;
+
+            // Call Python AI service with longer timeout
+            $response = Http::timeout(120)->post($this->aiServiceUrl . '/research/message', [
+                'session_id' => $sessionId,
+                'user_message' => $userMessage
+            ]);
+
+            if (!$response->successful()) {
+                throw new \Exception('AI service error: ' . $response->body());
             }
-        }
-        
-        return $formatted;
-    }
 
-    /**
-     * Get current account plan
-     */
-    public function getPlan(Request $request): JsonResponse
-    {
-        $request->validate([
-            'session_id' => 'required|string',
-        ]);
-
-        $sessionId = $request->input('session_id');
-        
-        // Check if it's a step workflow session
-        $state = Cache::get("agent_state_{$sessionId}");
-        $isStepWorkflow = $state && isset($state['mode']) && $state['mode'] === 'step_workflow';
-        
-        // Use appropriate section getter
-        $plan = $isStepWorkflow 
-            ? $this->planService->getStepSections($sessionId)
-            : $this->planService->getPlanSections($sessionId);
-
-        return response()->json([
-            'success' => true,
-            'plan' => $plan,
-            'is_step_workflow' => $isStepWorkflow,
-        ]);
-    }
-
-    /**
-     * Update a specific plan section
-     */
-    public function updatePlanSection(Request $request): JsonResponse
-    {
-        $request->validate([
-            'session_id' => 'required|string',
-            'section' => 'required|string',
-            'content' => 'required',
-        ]);
-
-        $sessionId = $request->input('session_id');
-        $section = $request->input('section');
-        $content = $request->input('content');
-
-        try {
-            $plan = $this->planService->updateSection($sessionId, $section, $content);
+            $data = $response->json();
 
             return response()->json([
-                'success' => true,
-                'plan' => $this->planService->getPlanSections($sessionId),
+                'success' => $data['success'] ?? true,
+                'session_id' => $sessionId,
+                'response' => $data['response'] ?? '',
+                'messages' => $data['messages'] ?? null,
+                'data' => $data['data'] ?? null,
+                'chart' => $data['chart'] ?? null,
+                'step' => $data['step'] ?? null,
+                'company' => $data['company'] ?? null,
+                'prompt_user' => $data['prompt_user'] ?? false,
+                'prompt_message' => $data['prompt_message'] ?? null
             ]);
+
         } catch (\Exception $e) {
+            Log::error('Message processing error', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
             return response()->json([
                 'success' => false,
-                'error' => 'Failed to update plan section.',
-                'message' => $e->getMessage(),
+                'error' => 'An error occurred processing your message'
             ], 500);
         }
-    }
-
-    /**
-     * Regenerate a plan section
-     */
-    public function regenerateSection(Request $request): JsonResponse
-    {
-        $request->validate([
-            'session_id' => 'required|string',
-            'section' => 'required|string',
-        ]);
-
-        $sessionId = $request->input('session_id');
-        $section = $request->input('section');
-
-        try {
-            // Clear the section
-            $this->planService->regenerateSection($sessionId, $section);
-
-            // Get conversation context
-            $history = $this->memoryService->getRecentMessages($sessionId, 5);
-            $contextMessage = "Please regenerate the '{$section}' section of the account plan based on our conversation.";
-
-            // Process regeneration through agent
-            $result = $this->agentService->processMessage($sessionId, $contextMessage);
-
-            return response()->json([
-                'success' => true,
-                'plan' => $result['plan'],
-                'responses' => $result['responses'],
-            ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'error' => 'Failed to regenerate section.',
-                'message' => $e->getMessage(),
-            ], 500);
-        }
-    }
-
-    /**
-     * Get conversation history
-     */
-    public function getHistory(Request $request): JsonResponse
-    {
-        $request->validate([
-            'session_id' => 'required|string',
-        ]);
-
-        $sessionId = $request->input('session_id');
-        $history = $this->memoryService->getHistory($sessionId);
-
-        return response()->json([
-            'success' => true,
-            'history' => $history,
-        ]);
-    }
-
-    /**
-     * Clear conversation history
-     */
-    public function clearHistory(Request $request): JsonResponse
-    {
-        $request->validate([
-            'session_id' => 'required|string',
-        ]);
-
-        $sessionId = $request->input('session_id');
-        $this->memoryService->clearHistory($sessionId);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'History cleared successfully',
-        ]);
-    }
-
-    /**
-     * Generate a unique session ID
-     */
-    private function generateSessionId(): string
-    {
-        return Str::uuid()->toString();
     }
 }
-

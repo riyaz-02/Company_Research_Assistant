@@ -153,6 +153,21 @@ class ProcessMessagesResponse(BaseModel):
     params: Optional[Dict[str, Any]] = Field(default=None, description="Action parameters")
 
 
+class InterpretIntentRequest(BaseModel):
+    """Request to interpret user intent using AI"""
+    user_message: str = Field(..., description="User's natural language message")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Context about current conversation state")
+    session_id: str = Field(default="default", description="Session ID for caching")
+
+
+class InterpretIntentResponse(BaseModel):
+    """Response from intent interpretation"""
+    intent: str = Field(..., description="Detected intent: yes, no, next_step, deep_research, retry_synthesis, or unclear")
+    confidence: float = Field(..., description="Confidence score 0-1")
+    explanation: str = Field(..., description="Human-readable explanation of what AI understood")
+    suggested_response: Optional[str] = Field(default=None, description="Suggested conversational response to user")
+
+
 class AnalyzeDataResponse(BaseModel):
     """Response from data analysis"""
     content: str = Field(..., description="Analysis result")
