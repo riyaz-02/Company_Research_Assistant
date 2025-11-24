@@ -3,6 +3,7 @@ AI Company Research Agent
 Handles all research logic, intent classification, and data processing
 """
 import os
+import re
 import json
 import requests
 from typing import Dict, List, Optional, Any
@@ -1359,26 +1360,55 @@ Analyze the user's behavior and respond with JSON:
             
             if response.status_code == 200:
                 data = response.json()
-                text = data['candidates'][0]['content']['parts'][0]['text'].strip()
                 
-                # Clean JSON
-                if text.startswith('```json'):
-                    text = text[7:]
-                if text.startswith('```'):
-                    text = text[3:]
-                if text.endswith('```'):
-                    text = text[:-3]
-                text = text.strip()
+                # Check if response has expected structure
+                if 'candidates' in data and len(data['candidates']) > 0:
+                    candidate = data['candidates'][0]
+                    if 'content' in candidate and 'parts' in candidate['content']:
+                        parts = candidate['content']['parts']
+                        if len(parts) > 0 and 'text' in parts[0]:
+                            text = parts[0]['text'].strip()
+                            
+                            # Clean JSON
+                            if text.startswith('```json'):
+                                text = text[7:]
+                            if text.startswith('```'):
+                                text = text[3:]
+                            if text.endswith('```'):
+                                text = text[:-3]
+                            text = text.strip()
+                            
+                            # Try to fix common JSON issues
+                            # Replace single quotes with double quotes
+                            text = text.replace("'", '"')
+                            # Fix unquoted property names (basic fix)
+                            text = re.sub(r'(\w+):', r'"\1":', text)
+                            # Remove trailing commas before closing braces/brackets
+                            text = re.sub(r',(\s*[}\]])', r'\1', text)
+                            
+                            try:
+                                result = json.loads(text)
+                                logger.info(f"User analysis: {result}")
+                                return result
+                            except json.JSONDecodeError as je:
+                                logger.warning(f"Failed to parse JSON after cleanup: {je}")
+                                logger.debug(f"Cleaned text was: {text}")
+                                # Return default on parse failure
+                                return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral', 'confidence': 1.0}
                 
-                result = json.loads(text)
-                logger.info(f"User analysis: {result}")
-                return result
+                # If structure is unexpected, log and return default
+                logger.warning(f"Unexpected Gemini response structure: {data}")
+            else:
+                logger.warning(f"Gemini API returned status {response.status_code}")
             
-            return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral'}
+            return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral', 'confidence': 1.0}
             
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing user type JSON: {e}")
+            return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral', 'confidence': 1.0}
         except Exception as e:
             logger.error(f"Error analyzing user type: {e}")
-            return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral'}
+            return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral', 'confidence': 1.0}
     
     def _get_adaptive_instruction(self, user_type: str) -> str:
         """Get adaptive instructions based on user type"""
