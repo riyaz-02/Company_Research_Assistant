@@ -729,6 +729,9 @@
         let isRecording = false;
         let silenceTimer = null;
         let finalTranscript = '';
+        let networkErrorCount = 0;
+        let restartAttempts = 0;
+        const MAX_RESTART_ATTEMPTS = 3;
 
         // Check if browser supports speech recognition
         if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -737,21 +740,29 @@
             recognition.continuous = true;
             recognition.interimResults = true;
             recognition.lang = 'en-US';
+            recognition.maxAlternatives = 3;
 
             recognition.onstart = () => {
+                console.log('Voice recognition started');
                 isRecording = true;
                 voiceButton.classList.add('recording');
                 // Change to stop icon
                 voiceIcon.innerHTML = '<path d="M6 6h12v12H6z"/>';
                 finalTranscript = '';
-                messageInput.placeholder = 'Listening...';
+                messageInput.value = '';
+                messageInput.placeholder = '🎤 Listening... Speak now';
+                restartAttempts = 0;
+                networkErrorCount = 0;
             };
 
             recognition.onresult = (event) => {
+                console.log('Got speech result');
                 let interimTranscript = '';
+                networkErrorCount = 0; // Reset on successful result
                 
                 for (let i = event.resultIndex; i < event.results.length; i++) {
                     const transcript = event.results[i][0].transcript;
+                    console.log(`Result ${i}: "${transcript}" (final: ${event.results[i].isFinal})`);
                     if (event.results[i].isFinal) {
                         finalTranscript += transcript + ' ';
                     } else {
@@ -760,7 +771,9 @@
                 }
 
                 // Update input field with current transcript
-                messageInput.value = (finalTranscript + interimTranscript).trim();
+                const currentText = (finalTranscript + interimTranscript).trim();
+                messageInput.value = currentText;
+                console.log('Current transcript:', currentText);
 
                 // Clear previous silence timer
                 if (silenceTimer) {
@@ -768,61 +781,69 @@
                 }
 
                 // Set new silence timer (2 seconds of silence will trigger send)
-                silenceTimer = setTimeout(() => {
-                    if (isRecording && finalTranscript.trim()) {
-                        stopRecording();
-                        // Auto-send after detecting silence
-                        setTimeout(() => {
-                            if (messageInput.value.trim()) {
-                                sendMessage();
-                            }
-                        }, 500);
-                    }
-                }, 2000);
-            };
-
-            recognition.onerror = (event) => {
-                console.error('Speech recognition error:', event.error);
-                if (event.error === 'no-speech') {
-                    // User didn't speak, just continue listening
-                    return;
-                } else if (event.error === 'not-allowed') {
-                    addAssistantMessage('Microphone access denied. Please allow microphone permissions in your browser settings.');
-                    stopRecording();
-                } else if (event.error === 'aborted') {
-                    // Normal abort, don't show error
-                    return;
-                } else if (event.error === 'network') {
-                    addAssistantMessage('Network error. Please check your internet connection.');
-                    stopRecording();
-                } else {
-                    // For other errors, just restart
-                    console.log('Restarting recognition after error:', event.error);
-                    if (isRecording) {
-                        setTimeout(() => {
-                            try {
-                                recognition.start();
-                            } catch (e) {
-                                console.error('Could not restart:', e);
-                            }
-                        }, 100);
-                    }
+                if (finalTranscript.trim()) {
+                    silenceTimer = setTimeout(() => {
+                        if (isRecording && finalTranscript.trim()) {
+                            console.log('Silence detected, stopping and sending');
+                            stopRecording();
+                            // Auto-send after detecting silence
+                            setTimeout(() => {
+                                if (messageInput.value.trim()) {
+                                    sendMessage();
+                                }
+                            }, 500);
+                        }
+                    }, 2000);
                 }
             };
 
+            recognition.onerror = (event) => {
+                console.log('Speech recognition error:', event.error);
+                
+                if (event.error === 'no-speech') {
+                    console.log('No speech detected, continuing...');
+                    return;
+                } else if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                    addAssistantMessage('🎤 Microphone access denied. Please check browser permissions.');
+                    stopRecording();
+                    return;
+                } else if (event.error === 'aborted') {
+                    console.log('Recognition aborted normally');
+                    return;
+                } else if (event.error === 'network') {
+                    console.log('Network error - Web Speech API requires internet connection');
+                    addAssistantMessage('⚠️ Voice recognition requires internet connection. Please check your connection or use text input.');
+                    stopRecording();
+                    return;
+                } else if (event.error === 'audio-capture') {
+                    addAssistantMessage('🎤 Microphone not accessible. Please check your microphone.');
+                    stopRecording();
+                    return;
+                }
+                
+                // For other errors, just stop
+                console.log('Stopping due to error:', event.error);
+                stopRecording();
+            };
+
             recognition.onend = () => {
+                console.log('Recognition ended, isRecording:', isRecording);
                 if (isRecording) {
                     // If still in recording state, restart (for continuous listening)
                     setTimeout(() => {
                         if (isRecording) {
                             try {
+                                console.log('Restarting recognition...');
                                 recognition.start();
                             } catch (e) {
-                                console.error('Could not restart recognition:', e);
-                                stopRecording();
+                                console.log('Could not restart recognition:', e.message);
+                                // If already started, ignore the error
+                                if (!e.message.includes('already started')) {
+                                    stopRecording();
+                                }
                             }
                         }
-                    }, 100);
+                    }, 300);
                 }
             };
         } else {
@@ -1182,20 +1203,31 @@
             
             const html = `
                 <div class="message-content">
-                    <div style="padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; text-align: center;">
-                        <div style="color: white; font-size: 24px; margin-bottom: 10px;">📄</div>
-                        <div style="color: white; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
-                            Your PDF Report is Ready!
+                    <div style="padding: 24px; background: rgba(15, 23, 42, 0.7); backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); border: 1px solid rgba(99, 102, 241, 0.3); border-radius: 16px; text-align: center; box-shadow: 0 8px 32px rgba(99, 102, 241, 0.2);">
+                        <svg style="width: 48px; height: 48px; margin-bottom: 16px;" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" fill="rgba(99, 102, 241, 0.2)" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M14 2V8H20" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M16 13H8" stroke="#c7d2fe" stroke-width="2" stroke-linecap="round"/>
+                            <path d="M16 17H8" stroke="#c7d2fe" stroke-width="2" stroke-linecap="round"/>
+                            <path d="M10 9H8" stroke="#c7d2fe" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                        <div style="color: #e0e7ff; font-weight: 600; font-size: 18px; margin-bottom: 8px; letter-spacing: 0.3px;">
+                            PDF Report Ready
                         </div>
-                        <a href="http://localhost:8001/download/pdf/${filename}" download 
-                           style="display: inline-block; padding: 12px 30px; background: white; color: #667eea; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; transition: all 0.3s; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
-                           onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 12px rgba(0,0,0,0.15)'"
-                           onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 6px rgba(0,0,0,0.1)'">
-                            <span style="margin-right: 8px;">⬇️</span> Download PDF Report
-                        </a>
-                        <div style="color: rgba(255,255,255,0.9); font-size: 12px; margin-top: 12px;">
+                        <div style="color: rgba(203, 213, 225, 0.7); font-size: 13px; margin-bottom: 20px; font-family: 'Courier New', monospace;">
                             ${filename}
                         </div>
+                        <a href="http://localhost:8001/download/pdf/${filename}" download 
+                           style="display: inline-flex; align-items: center; gap: 10px; padding: 12px 28px; background: linear-gradient(135deg, rgba(99, 102, 241, 0.9), rgba(139, 92, 246, 0.9)); border: 1px solid rgba(139, 92, 246, 0.4); border-radius: 10px; text-decoration: none; font-weight: 600; font-size: 14px; color: white; transition: all 0.3s; box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);"
+                           onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 24px rgba(99, 102, 241, 0.5)'; this.style.background='linear-gradient(135deg, rgba(99, 102, 241, 1), rgba(139, 92, 246, 1))'"
+                           onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 16px rgba(99, 102, 241, 0.3)'; this.style.background='linear-gradient(135deg, rgba(99, 102, 241, 0.9), rgba(139, 92, 246, 0.9))'">
+                            <svg style="width: 18px; height: 18px;" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M21 15V19C21 19.5304 20.7893 20.0391 20.4142 20.4142C20.0391 20.7893 19.5304 21 19 21H5C4.46957 21 3.96086 20.7893 3.58579 20.4142C3.21071 20.0391 3 19.5304 3 19V15" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M7 10L12 15L17 10" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M12 15V3" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            Download Report
+                        </a>
                     </div>
                 </div>
             `;
