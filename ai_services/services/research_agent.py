@@ -114,7 +114,10 @@ NEVER create research unless the intent is provide_company or continue_research 
         try:
             session = self._get_session(session_id)
             
-            # Get intent from Gemini
+            # Analyze user profile and sentiment
+            self._update_user_profile(session_id, user_message, session)
+            
+            # Get intent from Gemini with user profile context
             gemini_response = self._call_gemini(user_message, session)
             
             if not gemini_response:
@@ -129,8 +132,15 @@ NEVER create research unless the intent is provide_company or continue_research 
             next_step = gemini_response.get('next_step', '')
             response = gemini_response.get('response', '')
 
+            # Handle preference gathering state
+            if session.get('pending_company') and not session.get('preferences_gathered'):
+                return self._process_preferences(session_id, user_message, response)
+
             # Route based on intent
             if intent == 'provide_company' and detected_company:
+                # Check if we should gather preferences first
+                if not session.get('preferences_gathered'):
+                    return self._gather_research_preferences(session_id, detected_company, response)
                 return self._start_research(session_id, detected_company, response)
             
             elif intent == 'continue_research' or intent == 'confirm':
@@ -181,6 +191,40 @@ NEVER create research unless the intent is provide_company or continue_research 
             
             else:
                 # greeting, off_topic, unclear, etc.
+                # Check if user is confused and needs help
+                user_type = session.get('user_profile', {}).get('type', 'normal')
+                if user_type == 'confused':
+                    helpful_response = """I understand! Let me help you get started. 
+
+Here are some popular companies you could research:
+
+📊 **Tech Companies**  
+Google, Apple, Microsoft, Tesla, Amazon
+
+💰 **Finance**  
+JPMorgan Chase, Goldman Sachs, Visa
+
+🛍️ **Retail**  
+Walmart, Target, Costco
+
+⚕️ **Healthcare**  
+Johnson & Johnson, Pfizer, UnitedHealth
+
+🍔 **Food & Beverage**  
+McDonald's, Starbucks, Coca-Cola
+
+---
+
+Just tell me which one interests you, or mention any other company you'd like to explore. I'll help you understand everything about them!
+
+**For example:** 'Tell me about Apple' or just 'Tesla'"""
+                    return {
+                        'success': True,
+                        'response': helpful_response,
+                        'data': None,
+                        'chart': None
+                    }
+                
                 return {
                     'success': True,
                     'response': response or "Hello! Which company would you like me to research?",
@@ -199,9 +243,18 @@ NEVER create research unless the intent is provide_company or continue_research 
     def _call_gemini(self, user_message: str, session: Dict) -> Optional[Dict]:
         """Call Gemini API with system prompt"""
         try:
+            # Get user profile for adaptive responses
+            user_profile = session.get('user_profile', {})
+            user_type = user_profile.get('type', 'normal')
+            
             context = ""
             if session.get('current_company'):
                 context = f"\nCurrent context: Researching {session['current_company']}, last completed step: {session.get('last_step', 'none')}"
+            
+            # Add user profile context for adaptive responses
+            if user_type != 'normal':
+                context += f"\nUser Profile: {user_type} user - {user_profile.get('description', '')}"
+                context += f"\nAdaptive Instruction: {self._get_adaptive_instruction(user_type)}"
 
             prompt = f"{self.SYSTEM_PROMPT}\n\nUser message: \"{user_message}\"{context}\n\nRespond with ONLY valid JSON, no markdown formatting."
 
@@ -1236,13 +1289,204 @@ If NO significant conflicts exist, return: {{"has_conflict": false}}"""
             'chart': None
         }
 
+    def _update_user_profile(self, session_id: str, user_message: str, session: Dict):
+        """Analyze user behavior and update profile"""
+        try:
+            profile = session.get('user_profile', {})
+            profile['message_count'] = profile.get('message_count', 0) + 1
+            
+            # Add to conversation history
+            history = session.get('conversation_history', [])
+            history.append(user_message)
+            session['conversation_history'] = history[-10:]  # Keep last 10 messages
+            
+            # Check for immediate confusion signals
+            msg_lower = user_message.lower()
+            confusion_keywords = ['help', 'confused', "don't know", "can't think", "not sure", "dont know", "cant think", "what do", "how do", "stuck", "overwhelmed"]
+            
+            if any(keyword in msg_lower for keyword in confusion_keywords):
+                profile['type'] = 'confused'
+                profile['confusion_signals'] = profile.get('confusion_signals', 0) + 1
+                profile['description'] = 'User is seeking help and guidance'
+                profile['sentiment'] = 'confused'
+            # Analyze user type after 2+ messages for more accurate classification
+            elif profile['message_count'] >= 2:
+                user_analysis = self._analyze_user_type(history)
+                profile['type'] = user_analysis.get('type', 'normal')
+                profile['description'] = user_analysis.get('description', '')
+                profile['sentiment'] = user_analysis.get('sentiment', 'neutral')
+            
+            session['user_profile'] = profile
+            self._save_session(session_id, session)
+            
+        except Exception as e:
+            logger.error(f"Error updating user profile: {e}")
+    
+    def _analyze_user_type(self, conversation_history: list) -> Dict:
+        """Use Gemini to analyze user type and sentiment"""
+        try:
+            conversation_text = "\n".join(conversation_history)
+            
+            prompt = f"""Analyze this conversation and classify the user type:
+
+Conversation:
+{conversation_text}
+
+User Types:
+1. CONFUSED: User is unsure, asks many clarifying questions, uncertain what they want
+2. EFFICIENT: User is direct, wants quick results, minimal conversation, gives short responses
+3. CHATTY: User goes off-topic frequently, adds extra context, conversational style
+4. EDGE_CASE: User provides invalid inputs, goes off-topic, requests beyond capabilities
+
+Analyze the user's behavior and respond with JSON:
+{{
+    "type": "confused|efficient|chatty|edge_case|normal",
+    "description": "Brief description of user behavior",
+    "sentiment": "positive|neutral|negative|confused",
+    "confidence": 0.0-1.0
+}}"""
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
+            
+            response = requests.post(
+                url,
+                json={
+                    'contents': [{'parts': [{'text': prompt}]}],
+                    'generationConfig': {'temperature': 0.3, 'maxOutputTokens': 500}
+                },
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                text = data['candidates'][0]['content']['parts'][0]['text'].strip()
+                
+                # Clean JSON
+                if text.startswith('```json'):
+                    text = text[7:]
+                if text.startswith('```'):
+                    text = text[3:]
+                if text.endswith('```'):
+                    text = text[:-3]
+                text = text.strip()
+                
+                result = json.loads(text)
+                logger.info(f"User analysis: {result}")
+                return result
+            
+            return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral'}
+            
+        except Exception as e:
+            logger.error(f"Error analyzing user type: {e}")
+            return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral'}
+    
+    def _get_adaptive_instruction(self, user_type: str) -> str:
+        """Get adaptive instructions based on user type"""
+        instructions = {
+            'confused': "Be EXTRA patient and supportive. Offer concrete examples and suggestions. Provide clear step-by-step guidance. If they can't decide, suggest popular companies. Make it easy for them.",
+            'efficient': "Be concise and direct. Skip pleasantries. Provide quick, actionable responses. Minimize back-and-forth.",
+            'chatty': "Be conversational but stay on task. Acknowledge their context. Gently guide back to research when they drift.",
+            'edge_case': "Be helpful and understanding. Validate their input. Explain limitations clearly. Offer alternative solutions."
+        }
+        return instructions.get(user_type, "Maintain professional, helpful tone.")
+    
+    def _process_preferences(self, session_id: str, user_message: str, response: str) -> Dict[str, Any]:
+        """Process user's research preferences"""
+        session = self._get_session(session_id)
+        company = session.get('pending_company')
+        
+        if not company:
+            return {
+                'success': False,
+                'response': 'I apologize, but I lost track of which company you wanted to research. Which company would you like me to research?',
+                'data': None
+            }
+        
+        user_message_lower = user_message.lower()
+        
+        # Determine research focus
+        focus_areas = []
+        if 'all' in user_message_lower or 'comprehensive' in user_message_lower or 'everything' in user_message_lower:
+            focus_areas = ['overview', 'financials', 'products', 'market', 'opportunities']
+        elif 'financial' in user_message_lower or 'revenue' in user_message_lower or 'profit' in user_message_lower:
+            focus_areas = ['financials', 'overview']
+        elif 'product' in user_message_lower or 'service' in user_message_lower:
+            focus_areas = ['products', 'overview']
+        elif 'market' in user_message_lower or 'competitor' in user_message_lower:
+            focus_areas = ['market', 'overview']
+        elif 'opportunit' in user_message_lower:
+            focus_areas = ['opportunities', 'market', 'overview']
+        else:
+            # Default to comprehensive if unclear
+            focus_areas = ['overview', 'financials', 'products', 'market']
+        
+        # Save preferences
+        session['research_focus'] = focus_areas
+        session['preferences_gathered'] = True
+        session.pop('pending_company', None)
+        self._save_session(session_id, session)
+        
+        # Start research
+        return self._start_research(session_id, company, f"Perfect! I'll focus on {', '.join(focus_areas)} for {company}. Let's begin!")
+    
+    def _gather_research_preferences(self, session_id: str, company: str, response: str) -> Dict[str, Any]:
+        """Gather research preferences before starting research"""
+        session = self._get_session(session_id)
+        session['pending_company'] = company
+        self._save_session(session_id, session)
+        
+        user_type = session.get('user_profile', {}).get('type', 'normal')
+        
+        # Efficient users skip preferences
+        if user_type == 'efficient':
+            session['preferences_gathered'] = True
+            session['research_focus'] = ['overview', 'financials', 'products']  # Quick essentials
+            self._save_session(session_id, session)
+            return self._start_research(session_id, company, response)
+        
+        # For other users, ask about preferences
+        preference_message = f"""Great! I'll research **{company}** for you. 
+
+To provide the most relevant insights, I'd like to know:
+
+**What aspects of {company} are you most interested in?**
+
+• Financial performance and metrics  
+• Products and services  
+• Market position and competitors  
+• Business opportunities  
+• All of the above (comprehensive research)
+
+---
+
+Please let me know your focus area, or say **'all'** for complete research."""
+        
+        return {
+            'success': True,
+            'messages': [
+                {'type': 'text', 'content': preference_message}
+            ],
+            'awaiting_preferences': True
+        }
+
     def _get_session(self, session_id: str) -> Dict:
         """Get or create session"""
         if session_id not in self.sessions:
             self.sessions[session_id] = {
                 'current_company': None,
                 'last_step': None,
-                'research_data': {}
+                'research_data': {},
+                'user_profile': {
+                    'type': 'normal',
+                    'message_count': 0,
+                    'off_topic_count': 0,
+                    'question_count': 0,
+                    'confusion_signals': 0,
+                    'efficiency_signals': 0,
+                    'sentiment_history': []
+                },
+                'conversation_history': [],
+                'preferences_gathered': False
             }
         return self.sessions[session_id]
 
