@@ -3,10 +3,12 @@ FastAPI Main Application - AI Service for Company Research
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 from loguru import logger
 import sys
+import os
 
 from config.settings import settings
 from services.research_agent import research_agent
@@ -103,6 +105,28 @@ async def handle_message(request: MessageRequest):
     
     except Exception as e:
         logger.error(f"Message handling error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/download/pdf/{filename}")
+async def download_pdf(filename: str):
+    """
+    Download generated PDF report
+    """
+    try:
+        file_path = os.path.join('storage', 'reports', filename)
+        
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="PDF file not found")
+        
+        return FileResponse(
+            path=file_path,
+            media_type='application/pdf',
+            filename=filename
+        )
+    
+    except Exception as e:
+        logger.error(f"PDF download error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

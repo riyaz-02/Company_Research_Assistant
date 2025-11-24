@@ -277,10 +277,6 @@
         const messageInput = document.getElementById('messageInput');
         const sendButton = document.getElementById('sendButton');
         const summaryContent = document.getElementById('summaryContent');
-
-        if (!sessionId) {
-            addAssistantMessage("Hello! I'm your AI Company Research Assistant. I can help you research any company with data visualizations. Just tell me which company you'd like to know about!");
-        }
         
         // Load existing summary
         renderSummary();
@@ -343,6 +339,7 @@
         }
 
         function addUserMessage(text) {
+            disablePreviousButtons();
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message user';
             messageDiv.innerHTML = `<div class="message-content">${escapeHtml(text)}</div>`;
@@ -394,16 +391,49 @@
             saveToSummary(step, data, company);
         }
 
+        let thinkingInterval = null;
+        const thinkingStates = [
+            'Thinking...',
+            'Analyzing...',
+            'Scraping data...',
+            'Organizing...',
+            'Processing...',
+            'Researching...'
+        ];
+        let currentThinkingIndex = 0;
+
         function showThinking() {
             const thinkingDiv = document.createElement('div');
             thinkingDiv.className = 'message assistant';
             thinkingDiv.id = 'thinking';
-            thinkingDiv.innerHTML = `<div class="thinking">Thinking</div>`;
+            thinkingDiv.innerHTML = `<div class="thinking">${thinkingStates[0]}</div>`;
             messagesContainer.appendChild(thinkingDiv);
             scrollToBottom();
+            
+            currentThinkingIndex = 0;
+            
+            function updateThinkingState() {
+                const thinkingElement = document.getElementById('thinking');
+                if (thinkingElement) {
+                    currentThinkingIndex = (currentThinkingIndex + 1) % thinkingStates.length;
+                    thinkingElement.querySelector('.thinking').textContent = thinkingStates[currentThinkingIndex];
+                    
+                    // Set random duration between 2500ms and 5000ms for next update
+                    const randomDelay = Math.floor(Math.random() * (5000 - 2500 + 1)) + 2500;
+                    thinkingInterval = setTimeout(updateThinkingState, randomDelay);
+                }
+            }
+            
+            // Start with random initial delay (2.5s to 4.5s)
+            const initialDelay = Math.floor(Math.random() * (4500 - 2500 + 1)) + 2500;
+            thinkingInterval = setTimeout(updateThinkingState, initialDelay);
         }
 
         function removeThinking() {
+            if (thinkingInterval) {
+                clearTimeout(thinkingInterval);
+                thinkingInterval = null;
+            }
             const thinking = document.getElementById('thinking');
             if (thinking) {
                 thinking.remove();
@@ -412,14 +442,31 @@
 
         function addPromptWithButtons(promptText) {
             const messageDiv = document.createElement('div');
-            messageDiv.className = 'message assistant';
+            messageDiv.className = 'message assistant prompt-message';
+            
+            // Check if this is a PDF report prompt
+            const isPdfPrompt = promptText.toLowerCase().includes('pdf report');
+            
+            let buttonsHtml = '';
+            if (isPdfPrompt) {
+                // Only Yes/No buttons for PDF prompt
+                buttonsHtml = `
+                    <button class="prompt-button" onclick="sendQuickMessage('yes, generate pdf')" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Yes, Generate PDF</button>
+                    <button class="prompt-button" onclick="sendQuickMessage('no thanks')" style="padding: 8px 16px; background: #6b7280; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">No, Thanks</button>
+                `;
+            } else {
+                // Standard research action buttons
+                buttonsHtml = `
+                    <button class="prompt-button" onclick="sendQuickMessage('yes')" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Yes, Continue</button>
+                    <button class="prompt-button" onclick="sendQuickMessage('deep research')" style="padding: 8px 16px; background: #f59e0b; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Deep Research</button>
+                    <button class="prompt-button" onclick="handleStopButton()" style="padding: 8px 16px; background: #e53e3e; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">No, Stop</button>
+                `;
+            }
             
             const html = `
                 <div class="message-content">${escapeHtml(promptText)}</div>
-                <div style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button onclick="sendQuickMessage('yes')" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Yes, Continue</button>
-                    <button onclick="sendQuickMessage('deep research')" style="padding: 8px 16px; background: #f59e0b; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Deep Research</button>
-                    <button onclick="sendQuickMessage('no, stop')" style="padding: 8px 16px; background: #e53e3e; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">No, Stop</button>
+                <div class="button-container" style="margin-top: 15px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    ${buttonsHtml}
                 </div>
             `;
             
@@ -428,9 +475,118 @@
             scrollToBottom();
         }
         
+        function addConflictMessage(conflictData, step) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message assistant';
+            
+            const fieldName = conflictData.field_name || 'data';
+            const conflictType = conflictData.conflict_type || 'information';
+            
+            let sourcesHtml = '';
+            conflictData.sources.forEach((source, index) => {
+                const sourceType = source.is_official ? ' <span style="color: #10b981; font-weight: 600;">📄 (Official Source)</span>' : '';
+                sourcesHtml += `
+                    <div class="conflict-source" style="margin: 10px 0; padding: 12px; background: #f9fafb; border-left: 3px solid ${source.is_official ? '#10b981' : '#667eea'}; border-radius: 4px;">
+                        <div style="font-weight: 600; color: ${source.is_official ? '#10b981' : '#667eea'};">Source ${source.source_id}${sourceType}</div>
+                        <div style="margin-top: 8px; font-size: 15px; color: #1f2937; font-weight: 500;">${escapeHtml(source.display_text)}</div>
+                        ${source.context ? `<div style="margin-top: 5px; font-size: 13px; color: #6b7280;">${escapeHtml(source.context)}</div>` : ''}
+                        <button class="prompt-button conflict-choice" onclick="sendQuickMessage('use source ${source.source_id}')" 
+                            style="margin-top: 8px; padding: 6px 12px; background: ${source.is_official ? '#10b981' : '#667eea'}; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; transition: all 0.2s;">
+                            Use This Value
+                        </button>
+                    </div>
+                `;
+            });
+            
+            const html = `
+                <div class="message-content">
+                    <div style="color: #f59e0b; font-weight: 600; margin-bottom: 10px; font-size: 15px;">
+                        🔍 Data Conflict Detected
+                    </div>
+                    <p style="margin-bottom: 15px; color: #374151;">${escapeHtml(conflictData.question || 'Which value should I use?')}</p>
+                    ${sourcesHtml}
+                    ${conflictData.recommendation ? `
+                        <div style="margin-top: 15px; padding: 12px; background: #eff6ff; border-left: 3px solid #3b82f6; border-radius: 4px;">
+                            <p style="margin: 0; font-size: 13px; color: #1e40af;">
+                                <span style="font-weight: 600;">💡 Recommendation:</span> ${escapeHtml(conflictData.recommendation)}
+                            </p>
+                        </div>
+                    ` : ''}
+                </div>
+            `;
+            
+            messageDiv.innerHTML = html;
+            messagesContainer.appendChild(messageDiv);
+            scrollToBottom();
+        }
+        
+        function addPdfDownloadButton(filename) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message assistant';
+            
+            const html = `
+                <div class="message-content">
+                    <div style="padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; text-align: center;">
+                        <div style="color: white; font-size: 24px; margin-bottom: 10px;">📄</div>
+                        <div style="color: white; font-weight: 600; font-size: 16px; margin-bottom: 15px;">
+                            Your PDF Report is Ready!
+                        </div>
+                        <a href="http://localhost:8001/download/pdf/${filename}" download 
+                           style="display: inline-block; padding: 12px 30px; background: white; color: #667eea; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; transition: all 0.3s; box-shadow: 0 4px 6px rgba(0,0,0,0.1);"
+                           onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 12px rgba(0,0,0,0.15)'"
+                           onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 4px 6px rgba(0,0,0,0.1)'">
+                            <span style="margin-right: 8px;">⬇️</span> Download PDF Report
+                        </a>
+                        <div style="color: rgba(255,255,255,0.9); font-size: 12px; margin-top: 12px;">
+                            ${filename}
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            messageDiv.innerHTML = html;
+            messagesContainer.appendChild(messageDiv);
+            scrollToBottom();
+        }
+        
+        function disablePreviousButtons() {
+            // Disable all buttons in previous prompt messages
+            const allButtons = messagesContainer.querySelectorAll('.prompt-button');
+            allButtons.forEach(button => {
+                button.disabled = true;
+                button.style.opacity = '0.5';
+                button.style.cursor = 'not-allowed';
+            });
+        }
+        
         function sendQuickMessage(message) {
+            disablePreviousButtons();
             messageInput.value = message;
             sendMessage();
+        }
+        
+        function handleStopButton() {
+            // Get the last research data that was displayed
+            const researchCards = document.querySelectorAll('.research-card');
+            if (researchCards.length > 0) {
+                const lastCard = researchCards[researchCards.length - 1];
+                const heading = lastCard.querySelector('h3');
+                if (heading) {
+                    const headingText = heading.textContent;
+                    const match = headingText.match(/(.+?)\s*-\s*(.+)/);
+                    if (match) {
+                        const company = match[1].trim();
+                        const step = match[2].trim().toLowerCase().replace(/\s+/g, '_');
+                        const data = lastCard.querySelector('p')?.textContent || '';
+                        
+                        // Save to summary before stopping
+                        saveToSummary(step, data, company);
+                    }
+                }
+            }
+            
+            // Now send the stop message
+            sendQuickMessage('no, stop');
         }
 
         function scrollToBottom() {
@@ -482,6 +638,10 @@
                                     addAssistantMessage(msg.content);
                                 } else if (msg.type === 'research') {
                                     addResearchData(msg.step, msg.data, msg.company, msg.chart);
+                                } else if (msg.type === 'conflict') {
+                                    addConflictMessage(msg.data, msg.step);
+                                } else if (msg.type === 'pdf_ready') {
+                                    addPdfDownloadButton(msg.filename);
                                 } else if (msg.type === 'prompt') {
                                     addPromptWithButtons(msg.content);
                                 }
@@ -520,6 +680,50 @@
             }
         });
 
+        // Show welcome message on first load
+        function showWelcomeMessage() {
+            // Check if chat is empty (no messages in container)
+            const existingMessages = messagesContainer.querySelectorAll('.message');
+            const hasSeenWelcome = sessionStorage.getItem('hasSeenWelcome');
+            
+            if (existingMessages.length === 0 && !hasSeenWelcome) {
+                setTimeout(() => {
+                    const welcomeMessage = `Hello! I'm your Company Research Assistant.
+
+I can help you research any company with comprehensive insights including company overview and background, financial analysis and performance, products and services, competitive landscape, and market opportunities.
+
+Try asking me about these companies:`;
+                    
+                    addAssistantMessage(welcomeMessage);
+                    
+                    setTimeout(() => {
+                        const messageDiv = document.createElement('div');
+                        messageDiv.className = 'message assistant';
+                        messageDiv.innerHTML = `
+                            <div class="message-content">
+                                <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
+                                    <button class="prompt-button" onclick="sendQuickMessage('research Google')" style="padding: 12px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
+                                        Research Google
+                                    </button>
+                                    <button class="prompt-button" onclick="sendQuickMessage('research Tesla')" style="padding: 12px 20px; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
+                                        Research Tesla
+                                    </button>
+                                    <button class="prompt-button" onclick="sendQuickMessage('research Apple')" style="padding: 12px 20px; background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; text-align: left;">
+                                        Research Apple
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                        messagesContainer.appendChild(messageDiv);
+                        scrollToBottom();
+                    }, 500);
+                    
+                    sessionStorage.setItem('hasSeenWelcome', 'true');
+                }, 300);
+            }
+        }
+
+        showWelcomeMessage();
         messageInput.focus();
     </script>
 </body>

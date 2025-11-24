@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 from bs4 import BeautifulSoup
+from services.pdf_generator import pdf_generator
 
 class ResearchAgent:
     """Main research agent using Gemini for all decisions"""
@@ -33,6 +34,7 @@ Classify the message into ONE of the following intents:
 - regenerate_content (includes: "shorter", "longer", "brief", "concise", "summarize", "expand", "rewrite")
 - custom_research (includes: "latest news", "recent news", "current news", "news about", "updates on", "what's new with")
 - end_research (includes: "end research", "stop", "that's enough", "finish")
+- generate_pdf (includes: "yes, generate pdf", "create pdf", "generate report", "make pdf", "export pdf")
 - confirm
 - reject
 - change_company
@@ -147,8 +149,30 @@ NEVER create research unless the intent is provide_company or continue_research 
             elif intent == 'end_research':
                 return self._reset_session(session_id, 'Research ended. Which company would you like to research next?')
             
+            elif intent == 'generate_pdf':
+                return self._generate_pdf_report(session_id, response)
+            
             elif intent == 'change_company':
                 return self._reset_session(session_id, response)
+            
+            # Handle "no thanks" after PDF prompt
+            elif session.get('research_stopped') and intent in ['greeting', 'unclear', 'off_topic']:
+                # User declined PDF, clean up session
+                self.sessions[session_id] = {
+                    'current_company': None,
+                    'last_step': None,
+                    'research_data': {}
+                }
+                return {
+                    'success': True,
+                    'response': 'No problem! Which company would you like to research next?',
+                    'data': None,
+                    'chart': None
+                }
+            
+            # Handle conflict resolution
+            elif session.get('pending_conflict'):
+                return self._resolve_conflict(session_id, user_message, response)
             
             else:
                 # greeting, off_topic, unclear, etc.
@@ -230,6 +254,39 @@ NEVER create research unless the intent is provide_company or continue_research 
         
         self._save_session(session_id, session)
         
+        # Check for conflicts in overview
+        conflict = research_result.get('conflict')
+        if conflict:
+            conflict_intro = f"🔍 I'm finding conflicting information about {conflict.get('field_name', 'this data')} for {company}.\n\n"
+            
+            sources_text = ""
+            for source in conflict.get('sources', []):
+                source_type = " 📄 (Official Source)" if source.get('is_official') else ""
+                sources_text += f"• Source {source['source_id']}{source_type}: {source['display_text']}\n"
+                if source.get('context'):
+                    sources_text += f"  Context: {source['context']}\n"
+            
+            recommendation = f"\n💡 {conflict.get('recommendation', 'Official sources tend to be more reliable.')}"
+            conflict_message = conflict_intro + sources_text + "\n" + conflict['question'] + recommendation
+            
+            session['pending_conflict'] = {
+                'step': 'overview',
+                'conflict': conflict,
+                'research_result': research_result
+            }
+            self._save_session(session_id, session)
+            
+            return {
+                'success': True,
+                'messages': [
+                    {'type': 'text', 'content': f"Great! I'll research {company} for you. Starting with an overview..."},
+                    {'type': 'text', 'content': conflict_message},
+                    {'type': 'conflict', 'data': conflict, 'step': 'overview'}
+                ],
+                'step': 'overview',
+                'company': company
+            }
+        
         return {
             'success': True,
             'messages': [
@@ -272,6 +329,41 @@ NEVER create research unless the intent is provide_company or continue_research 
         
         self._save_session(session_id, session)
         
+        # Check if there's a conflict
+        conflict = research_result.get('conflict')
+        if conflict:
+            # Format conflict message
+            conflict_intro = f"🔍 I'm finding conflicting information about {conflict.get('field_name', 'this data')} for {session['current_company']}.\n\n"
+            
+            sources_text = ""
+            for source in conflict.get('sources', []):
+                source_type = " 📄 (Official Source)" if source.get('is_official') else ""
+                sources_text += f"• Source {source['source_id']}{source_type}: {source['display_text']}\n"
+                if source.get('context'):
+                    sources_text += f"  Context: {source['context']}\n"
+            
+            recommendation = f"\n💡 {conflict.get('recommendation', 'Official sources tend to be more reliable.')}"
+            conflict_message = conflict_intro + sources_text + "\n" + conflict['question'] + recommendation
+            
+            # Store conflict data for resolution
+            session['pending_conflict'] = {
+                'step': next_step,
+                'conflict': conflict,
+                'research_result': research_result
+            }
+            self._save_session(session_id, session)
+            
+            return {
+                'success': True,
+                'messages': [
+                    {'type': 'text', 'content': conflict_message},
+                    {'type': 'conflict', 'data': conflict, 'step': next_step}
+                ],
+                'step': next_step,
+                'company': session['current_company']
+            }
+        
+        # No conflict - proceed normally
         # Get the NEXT step to ask about (step after the one we just researched)
         step_after_current = self._get_next_step(next_step)
         
@@ -317,6 +409,9 @@ NEVER create research unless the intent is provide_company or continue_research 
             # Search web
             search_results = self._search_web(company, step)
             
+            # Check for conflicts before synthesis
+            conflict = self._detect_conflicts_in_results(company, step, search_results)
+            
             # Synthesize results
             synthesized = self._synthesize_results(company, step, search_results)
             
@@ -331,6 +426,7 @@ NEVER create research unless the intent is provide_company or continue_research 
                 'text': synthesized,
                 'chart': chart,
                 'raw_results': search_results,  # Store raw results for regeneration
+                'conflict': conflict,  # Store detected conflicts
                 'timestamp': datetime.now().isoformat()
             }
 
@@ -556,6 +652,155 @@ NEVER create research unless the intent is provide_company or continue_research 
             'prompt_message': f"Is this better? Should I continue researching {company}?"
         }
     
+    def _detect_conflicts_in_results(self, company: str, step: str, results: List[Dict]) -> Optional[Dict]:
+        """Detect conflicts in search results using AI analysis"""
+        if len(results) < 2:
+            return None
+            
+        # Prepare sources data for AI analysis
+        sources_info = []
+        for i, result in enumerate(results[:5], 1):  # Analyze top 5 sources
+            content = result.get('snippet', '') + ' ' + result.get('content', '')
+            source_name = result.get('title', 'Unknown Source')
+            link = result.get('link', '')
+            
+            # Check if it's a reliable source
+            is_official = any(keyword in source_name.lower() or keyword in link.lower() 
+                            for keyword in ['annual report', 'investor relations', 'official', 'sec filing', 'quarterly report'])
+            
+            sources_info.append({
+                'source_id': i,
+                'source': source_name,
+                'link': link,
+                'content': content[:500],  # Limit content for analysis
+                'is_official': is_official
+            })
+        
+        # Use Gemini to detect conflicts
+        conflict_analysis = self._analyze_conflicts_with_ai(company, step, sources_info)
+        
+        return conflict_analysis
+    
+    def _analyze_conflicts_with_ai(self, company: str, step: str, sources_info: List[Dict]) -> Optional[Dict]:
+        """Use Gemini AI to analyze conflicts across all data types"""
+        try:
+            # Build analysis prompt
+            sources_text = ""
+            for source in sources_info:
+                official_marker = " [OFFICIAL SOURCE]" if source['is_official'] else ""
+                sources_text += f"\n\nSource {source['source_id']}{official_marker}:\nTitle: {source['source']}\nContent: {source['content']}\n"
+            
+            prompt = f"""You are analyzing search results about {company} for the '{step}' research section.
+
+Your task: Detect ANY conflicting or inconsistent information across these sources.
+
+Sources:
+{sources_text}
+
+Analyze for conflicts in:
+- Financial data (revenue, profit, valuation, funding)
+- Company facts (employee count, headquarters, founding year, CEO)
+- Product information (number of products, key offerings)
+- Market data (market share, customers, regions)
+- Any other factual data where sources disagree
+
+IMPORTANT:
+- Only flag SIGNIFICANT conflicts (>5% difference for numbers, clear factual disagreements for text)
+- Minor variations in wording are NOT conflicts
+- If one source is marked [OFFICIAL SOURCE], note that in your response
+- Be specific about what data conflicts and between which sources
+
+RESPOND IN VALID JSON ONLY:
+{{
+  "has_conflict": true/false,
+  "conflict_type": "revenue" or "employee_count" or "headquarters" or "product_count" or "founding_year" or "other",
+  "field_name": "descriptive name of conflicting field",
+  "question": "user-friendly question about the conflict",
+  "sources": [
+    {{
+      "source_id": 1,
+      "value": "the conflicting value from this source",
+      "display_text": "formatted display (e.g., '₹43,279 Cr' or '23,652 employees')",
+      "is_official": true/false,
+      "context": "brief context explaining this value"
+    }}
+  ],
+  "recommendation": "which source seems more reliable and why"
+}}
+
+If NO significant conflicts exist, return: {{"has_conflict": false}}"""
+
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={self.gemini_key}",
+                json={
+                    'contents': [{
+                        'parts': [{'text': prompt}]
+                    }],
+                    'generationConfig': {
+                        'temperature': 0.1,
+                        'maxOutputTokens': 1000
+                    }
+                },
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                text = result['candidates'][0]['content']['parts'][0]['text']
+                
+                # Clean and parse JSON
+                text = text.strip()
+                if text.startswith('```json'):
+                    text = text[7:]
+                if text.startswith('```'):
+                    text = text[3:]
+                if text.endswith('```'):
+                    text = text[:-3]
+                text = text.strip()
+                
+                conflict_data = json.loads(text)
+                
+                if conflict_data.get('has_conflict'):
+                    logger.info(f"Conflict detected in {step}: {conflict_data.get('field_name')}")
+                    return conflict_data
+                else:
+                    logger.info(f"No conflicts detected in {step}")
+                    return None
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error analyzing conflicts: {e}")
+            return None
+    
+    def _extract_revenue_from_text(self, text: str) -> Optional[float]:
+        """Extract revenue as a normalized number"""
+        import re
+        patterns = [
+            r'([₹\$€£]?\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(billion|million|crore|cr|b|m|thousand|k)',
+            r'revenue[:\s]+([₹\$€£]?\s*\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(billion|million|crore|cr|b|m|thousand|k)',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                amount_str = re.sub(r'[^\d.]', '', match.group(1))
+                try:
+                    amount = float(amount_str)
+                    unit = match.group(2).lower()
+                    
+                    multiplier = {
+                        'billion': 1_000_000_000, 'b': 1_000_000_000,
+                        'million': 1_000_000, 'm': 1_000_000,
+                        'crore': 10_000_000, 'cr': 10_000_000,
+                        'thousand': 1_000, 'k': 1_000
+                    }.get(unit, 1)
+                    
+                    return amount * multiplier
+                except ValueError:
+                    continue
+        return None
+    
     def _synthesize_results(self, company: str, step: str, results: List[Dict]) -> str:
         """Synthesize search results using Gemini"""
         return self._synthesize_with_instruction(company, step, results, "comprehensive, detailed analysis")
@@ -658,6 +903,16 @@ NEVER create research unless the intent is provide_company or continue_research 
             logger.error(f"Chart generation error: {e}")
             return None
 
+    def _format_revenue(self, amount: float) -> str:
+        """Format revenue amount for display"""
+        if amount >= 10_000_000:  # Crores
+            return f"₹{amount / 10_000_000:,.2f} Cr"
+        elif amount >= 1_000_000:  # Millions
+            return f"${amount / 1_000_000:,.2f} M"
+        elif amount >= 1_000:
+            return f"${amount / 1_000:,.2f} K"
+        return f"${amount:,.2f}"
+    
     def _get_next_step(self, last_step: Optional[str]) -> Optional[str]:
         """Get next research step"""
         if last_step is None:
@@ -672,6 +927,172 @@ NEVER create research unless the intent is provide_company or continue_research 
 
         return None
 
+    def _resolve_conflict(self, session_id: str, user_message: str, response: str) -> Dict[str, Any]:
+        """Resolve data conflict based on user choice"""
+        session = self._get_session(session_id)
+        pending = session.get('pending_conflict')
+        
+        if not pending:
+            return {'success': True, 'response': 'No pending conflicts.', 'data': None, 'chart': None}
+        
+        conflict = pending['conflict']
+        step = pending['step']
+        research_result = pending['research_result']
+        
+        # Determine which source user chose
+        user_choice_lower = user_message.lower()
+        chosen_source = None
+        
+        # Check for keywords
+        if 'official' in user_choice_lower or 'annual report' in user_choice_lower or 'source 1' in user_choice_lower:
+            # Find official source
+            for source in conflict.get('sources', []):
+                if source.get('is_official'):
+                    chosen_source = source
+                    break
+            if not chosen_source:
+                chosen_source = conflict['sources'][0]
+        elif 'source 2' in user_choice_lower:
+            chosen_source = conflict['sources'][1] if len(conflict['sources']) > 1 else conflict['sources'][0]
+        elif 'source 3' in user_choice_lower:
+            chosen_source = conflict['sources'][2] if len(conflict['sources']) > 2 else conflict['sources'][0]
+        elif any(keyword in user_choice_lower for keyword in ['first', '1']):
+            chosen_source = conflict['sources'][0]
+        elif any(keyword in user_choice_lower for keyword in ['second', '2']):
+            chosen_source = conflict['sources'][1] if len(conflict['sources']) > 1 else conflict['sources'][0]
+        
+        if not chosen_source:
+            # Default to official source if available
+            for source in conflict.get('sources', []):
+                if source.get('is_official'):
+                    chosen_source = source
+                    break
+            if not chosen_source:
+                chosen_source = conflict['sources'][0]
+        
+        # Update research result with chosen value
+        field_name = conflict.get('field_name', 'data')
+        chosen_value = chosen_source.get('display_text', chosen_source.get('value', 'N/A'))
+        
+        # Add note about chosen source to research data
+        source_note = f"\n\n--- Verified Data (Source: {chosen_source.get('source_id')}) ---\n{field_name}: {chosen_value}\n" + (f"Note: {chosen_source.get('context')}\n" if chosen_source.get('context') else "")
+        updated_text = research_result.get('text', '') + source_note
+        
+        research_result['text'] = updated_text
+        research_result['chosen_source'] = chosen_source
+        session['research_data'][step] = research_result
+        
+        # Clear pending conflict
+        del session['pending_conflict']
+        self._save_session(session_id, session)
+        
+        # Get next step
+        step_after_current = self._get_next_step(step)
+        step_names = {
+            'overview': 'Overview',
+            'financials': 'Financials',
+            'products': 'Products & Services',
+            'competitors': 'Competitors',
+            'pain_points': 'Pain Points',
+            'opportunities': 'Opportunities',
+            'recommendations': 'Recommendations'
+        }
+        
+        next_topic_questions = {
+            'products': f"Should I research the products and services of {session['current_company']}?",
+            'competitors': f"Should I research the competitors of {session['current_company']}?",
+            'pain_points': f"Should I analyze the pain points and challenges of {session['current_company']}?",
+            'opportunities': f"Should I identify opportunities for {session['current_company']}?",
+            'recommendations': f"Should I generate strategic recommendations for {session['current_company']}?"
+        }
+        
+        if step_after_current:
+            next_question = next_topic_questions.get(step_after_current, f"Should I continue with {step_names.get(step_after_current, step_after_current)}?")
+        else:
+            next_question = f"Research complete! Would you like to research another company?"
+        
+        # Create confirmation message
+        field_name = conflict.get('field_name', 'value')
+        confirmation = f"✓ Done. I'll use {chosen_value} as the official {field_name}."
+        
+        return {
+            'success': True,
+            'messages': [
+                {'type': 'text', 'content': confirmation},
+                {'type': 'research', 'step': step, 'data': updated_text, 'chart': research_result.get('chart'), 'company': session['current_company']},
+                {'type': 'prompt', 'content': next_question}
+            ],
+            'step': step,
+            'company': session['current_company']
+        }
+    
+    def _generate_pdf_report(self, session_id: str, response: str) -> Dict[str, Any]:
+        """Generate PDF report from research data"""
+        session = self._get_session(session_id)
+        company = session.get('current_company')
+        research_data = session.get('research_data', {})
+        
+        logger.info(f"PDF Generation Request - Session: {session_id}")
+        logger.info(f"Company: {company}")
+        logger.info(f"Research data keys: {list(research_data.keys()) if research_data else 'None'}")
+        
+        if not company or not research_data:
+            logger.warning("No company or research data available for PDF generation")
+            return {
+                'success': True,
+                'response': 'No research data available to generate PDF. Please start a research first.',
+                'data': None,
+                'chart': None
+            }
+        
+        try:
+            # Generate PDF filename
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{company.replace(' ', '_')}_{timestamp}.pdf"
+            output_path = os.path.join('storage', 'reports', filename)
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            logger.info(f"Generating PDF report for {company} at {output_path}")
+            logger.info(f"Full research data: {research_data}")
+            
+            # Generate PDF
+            success = pdf_generator.create_pdf(company, research_data, output_path)
+            
+            if success:
+                # Clean up session after PDF generation
+                self.sessions[session_id] = {
+                    'current_company': None,
+                    'last_step': None,
+                    'research_data': {}
+                }
+                
+                return {
+                    'success': True,
+                    'messages': [
+                        {'type': 'text', 'content': f"✅ PDF report generated successfully for {company}!"},
+                        {'type': 'pdf_ready', 'filename': filename, 'path': output_path},
+                        {'type': 'text', 'content': 'Which company would you like to research next?'}
+                    ],
+                    'pdf_filename': filename,
+                    'pdf_path': output_path
+                }
+            else:
+                return {
+                    'success': False,
+                    'response': 'Sorry, I encountered an error while generating the PDF. Please try again.',
+                    'data': None
+                }
+                
+        except Exception as e:
+            logger.error(f"Error in PDF generation: {e}", exc_info=True)
+            return {
+                'success': False,
+                'response': 'An error occurred while generating the PDF report.',
+                'data': None
+            }
+    
     def _reset_session(self, session_id: str, response: str) -> Dict[str, Any]:
         """Reset session for new company - offer PDF generation"""
         session = self._get_session(session_id)
@@ -680,12 +1101,10 @@ NEVER create research unless the intent is provide_company or continue_research 
         # Check if there's research data to export
         has_data = bool(session.get('research_data'))
         
-        # Reset session
-        self.sessions[session_id] = {
-            'current_company': None,
-            'last_step': None,
-            'research_data': {}
-        }
+        # DON'T reset session yet - keep data for PDF generation
+        # Only mark research as stopped
+        session['research_stopped'] = True
+        self._save_session(session_id, session)
         
         if has_data:
             return {
@@ -697,6 +1116,13 @@ NEVER create research unless the intent is provide_company or continue_research 
                 'data': None,
                 'chart': None
             }
+        
+        # If no data, reset session now
+        self.sessions[session_id] = {
+            'current_company': None,
+            'last_step': None,
+            'research_data': {}
+        }
         
         return {
             'success': True,
