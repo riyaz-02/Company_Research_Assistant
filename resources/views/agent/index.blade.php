@@ -269,9 +269,14 @@
     </div>
 
     <script>
-        let sessionId = localStorage.getItem('session_id') || null;
-        let researchSummary = JSON.parse(localStorage.getItem('research_summary') || '[]');
-        let currentCompany = localStorage.getItem('current_company') || null;
+        let sessionId = null; // Always start fresh on page load
+        let researchSummary = [];
+        let currentCompany = null;
+        
+        // Clear session data on page load
+        localStorage.removeItem('session_id');
+        localStorage.removeItem('research_summary');
+        localStorage.removeItem('current_company');
         
         const messagesContainer = document.getElementById('chatMessages');
         const messageInput = document.getElementById('messageInput');
@@ -800,13 +805,12 @@
             }
         });
 
-        // Show welcome message on first load
+        // Show welcome message on page load
         function showWelcomeMessage() {
-            // Check if chat is empty (no messages in container)
+            // Always show welcome message on fresh page load
             const existingMessages = messagesContainer.querySelectorAll('.message');
-            const hasSeenWelcome = sessionStorage.getItem('hasSeenWelcome');
             
-            if (existingMessages.length === 0 && !hasSeenWelcome) {
+            if (existingMessages.length === 0) {
                 setTimeout(() => {
                     const welcomeMessage = `Hello! I'm your Company Research Assistant.
 
@@ -837,8 +841,6 @@ Try asking me about these companies:`;
                         messagesContainer.appendChild(messageDiv);
                         scrollToBottom();
                     }, 500);
-                    
-                    sessionStorage.setItem('hasSeenWelcome', 'true');
                 }, 300);
             }
         }
