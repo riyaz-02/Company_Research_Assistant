@@ -666,8 +666,15 @@
     <div class="main-container">
         <div class="chat-container glass">
             <div class="chat-header">
-                <h1 style="font-size: 28px; font-weight: 700; margin: 0; text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);">AI Company Research Assistant</h1>
-                <p style="font-size: 14px; opacity: 0.95; margin-top: 8px;">Intelligent research with data visualization powered by AI</p>
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; width: 100%;">
+                    <div style="flex: 1;">
+                        <h1 style="font-size: 28px; font-weight: 700; margin: 0; text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);">AI Company Research Assistant</h1>
+                        <p style="font-size: 14px; opacity: 0.95; margin-top: 8px;">Intelligent research with data visualization powered by AI</p>
+                    </div>
+                    <div id="personaBadge" style="display: none; padding: 8px 16px; background: rgba(99, 102, 241, 0.2); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 20px; font-size: 12px; color: #c7d2fe; white-space: nowrap;">
+                        <span style="opacity: 0.7;">Mode:</span> <span id="personaType" style="font-weight: 600; margin-left: 4px;">Normal</span>
+                    </div>
+                </div>
             </div>
             
             <div class="chat-messages" id="chatMessages"></div>
@@ -1117,6 +1124,66 @@
             }
         }
 
+        function updatePersonaBadge(type, description) {
+            console.log('updatePersonaBadge called with:', type, description);
+            const badge = document.getElementById('personaBadge');
+            const typeSpan = document.getElementById('personaType');
+            
+            console.log('Badge element:', badge);
+            console.log('TypeSpan element:', typeSpan);
+            
+            if (!badge || !typeSpan) {
+                console.error('Badge or typeSpan element not found!');
+                return;
+            }
+            
+            const personaLabels = {
+                'confused': 'Guided',
+                'efficient': 'Express',
+                'chatty': 'Conversational',
+                'edge_case': 'Exploratory',
+                'normal': 'Standard'
+            };
+            
+            const personaColors = {
+                'confused': 'rgba(251, 191, 36, 0.2)',
+                'efficient': 'rgba(34, 197, 94, 0.2)',
+                'chatty': 'rgba(168, 85, 247, 0.2)',
+                'edge_case': 'rgba(239, 68, 68, 0.2)',
+                'normal': 'rgba(99, 102, 241, 0.2)'
+            };
+            
+            const personaBorders = {
+                'confused': 'rgba(251, 191, 36, 0.4)',
+                'efficient': 'rgba(34, 197, 94, 0.4)',
+                'chatty': 'rgba(168, 85, 247, 0.4)',
+                'edge_case': 'rgba(239, 68, 68, 0.4)',
+                'normal': 'rgba(99, 102, 241, 0.4)'
+            };
+            
+            const label = personaLabels[type] || type;
+            console.log('Setting badge label to:', label);
+            
+            typeSpan.textContent = label;
+            badge.style.background = personaColors[type] || personaColors['normal'];
+            badge.style.borderColor = personaBorders[type] || personaBorders['normal'];
+            badge.style.display = 'block';
+            badge.title = description || 'Interaction mode detected';
+            
+            console.log('Badge display set to: block');
+            console.log('Badge final styles:', {
+                display: badge.style.display,
+                background: badge.style.background,
+                borderColor: badge.style.borderColor
+            });
+            
+            // Add a subtle pulse animation when persona changes
+            badge.style.animation = 'none';
+            setTimeout(() => {
+                badge.style.animation = 'pulse 0.5s ease-in-out';
+            }, 10);
+        }
+
         function addPromptWithButtons(promptText) {
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message assistant prompt-message';
@@ -1402,9 +1469,17 @@
 
                 removeThinking();
 
+                console.log('Response data:', data);  // Debug log
+
                 if (data.success) {
                     sessionId = data.session_id;
                     localStorage.setItem('session_id', sessionId);
+
+                    // Update persona badge if detected
+                    if (data.user_analysis && data.user_analysis.type) {
+                        console.log('Updating persona badge:', data.user_analysis);  // Debug log
+                        updatePersonaBadge(data.user_analysis.type, data.user_analysis.description);
+                    }
 
                     // Process messages array if present
                     if (data.messages && Array.isArray(data.messages)) {

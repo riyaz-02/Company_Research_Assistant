@@ -51,6 +51,7 @@ class MessageRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     success: bool
+    session_id: Optional[str] = None  # Add session_id to response
     response: Optional[str] = None
     messages: Optional[list] = None
     data: Optional[str] = None
@@ -59,6 +60,7 @@ class MessageResponse(BaseModel):
     company: Optional[str] = None
     prompt_user: Optional[bool] = False
     prompt_message: Optional[str] = None
+    user_analysis: Optional[dict] = None  # Add persona detection data
 
 
 @app.on_event("startup")
@@ -95,12 +97,14 @@ async def handle_message(request: MessageRequest):
         
         return MessageResponse(
             success=result.get('success', True),
+            session_id=request.session_id,  # Return session_id
             response=result.get('response', ''),
             messages=result.get('messages'),
             data=result.get('data'),
             chart=result.get('chart'),
             step=result.get('step'),
-            company=result.get('company')
+            company=result.get('company'),
+            user_analysis=result.get('user_analysis')  # Include persona data
         )
     
     except Exception as e:

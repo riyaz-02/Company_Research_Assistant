@@ -94,21 +94,99 @@ NEVER create research unless the intent is provide_company or continue_research 
     def __init__(self):
         from dotenv import load_dotenv
         load_dotenv()
-        # Support both GEMINI_API_KEY and GEMINI_API_KEYS
-        self.gemini_key = os.getenv('GEMINI_API_KEY', '')
-        if not self.gemini_key:
-            # Fall back to GEMINI_API_KEYS (get first key)
-            keys = os.getenv('GEMINI_API_KEYS', '')
-            if keys:
-                self.gemini_key = keys.split(',')[0].strip()
+        
+        # Load multiple Gemini API keys for rotation
+        self.gemini_keys = []
+        
+        # Primary key
+        primary_key = os.getenv('GEMINI_API_KEY', '')
+        if primary_key:
+            self.gemini_keys.append(primary_key)
+        
+        # Additional keys from GEMINI_API_KEYS
+        keys_env = os.getenv('GEMINI_API_KEYS', '')
+        if keys_env:
+            additional_keys = [k.strip() for k in keys_env.split(',') if k.strip()]
+            self.gemini_keys.extend(additional_keys)
+        
+        # Add the 3 new API keys
+        self.gemini_keys.extend([
+            'AIzaSyB9GyxfTJVyiA2UW3CpGncKMDQb_uVG2tA',
+            'AIzaSyB9P8cwhNGiF6fXNh9kem-GCtL_CMdgheg',
+            'AIzaSyAzYFnPNNhnxcSirbSIxZ0rDxfuWclFINQ'
+        ])
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        self.gemini_keys = [k for k in self.gemini_keys if not (k in seen or seen.add(k))]
+        
+        self.current_key_index = 0
+        self.key_failures = {}  # Track failures per key
         
         self.serp_key = os.getenv('SERPAPI_API_KEY', '')
         self.sessions = {}
         
-        if not self.gemini_key:
-            logger.warning("GEMINI_API_KEY not found in environment variables")
+        if not self.gemini_keys:
+            logger.warning("No GEMINI_API_KEY found in environment variables")
+        else:
+            logger.info(f"Loaded {len(self.gemini_keys)} Gemini API keys for rotation")
+        
         if not self.serp_key:
             logger.warning("SERPAPI_API_KEY not found in environment variables")
+    
+    def _get_api_key(self) -> str:
+        """Get current API key with rotation"""
+        if not self.gemini_keys:
+            logger.error("No Gemini API keys available")
+            return ""
+        
+        return self.gemini_keys[self.current_key_index]
+    
+    def _rotate_api_key(self, failed_key: Optional[str] = None):
+        """Rotate to next API key on failure"""
+        if failed_key:
+            self.key_failures[failed_key] = self.key_failures.get(failed_key, 0) + 1
+            logger.warning(f"API key failed (failures: {self.key_failures[failed_key]})")
+        
+        # Move to next key
+        self.current_key_index = (self.current_key_index + 1) % len(self.gemini_keys)
+        logger.info(f"Rotated to API key {self.current_key_index + 1}/{len(self.gemini_keys)}")
+    
+    def _call_gemini_with_retry(self, url_template: str, payload: dict, max_retries: Optional[int] = None) -> Optional[dict]:
+        """Call Gemini API with automatic key rotation on failure"""
+        if max_retries is None:
+            max_retries = len(self.gemini_keys)
+        
+        for attempt in range(max_retries):
+            api_key = self._get_api_key()
+            url = url_template.format(api_key=api_key)
+            
+            try:
+                response = requests.post(url, json=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 429:  # Rate limit
+                    logger.warning(f"Rate limit hit on key {self.current_key_index + 1}, rotating...")
+                    self._rotate_api_key(api_key)
+                    continue
+                elif response.status_code in [401, 403]:  # Invalid key
+                    logger.error(f"Invalid API key {self.current_key_index + 1}, rotating...")
+                    self._rotate_api_key(api_key)
+                    continue
+                else:
+                    logger.error(f"Gemini API error {response.status_code}: {response.text}")
+                    self._rotate_api_key(api_key)
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Request failed: {e}")
+                self._rotate_api_key(api_key)
+                if attempt < max_retries - 1:
+                    continue
+        
+        logger.error(f"All {max_retries} API keys failed")
+        return None
 
     def handle_message(self, session_id: str, user_message: str) -> Dict[str, Any]:
         """Main entry point for processing user messages"""
@@ -223,14 +301,16 @@ Just tell me which one interests you, or mention any other company you'd like to
                         'success': True,
                         'response': helpful_response,
                         'data': None,
-                        'chart': None
+                        'chart': None,
+                        'user_analysis': self._get_user_analysis(session)
                     }
                 
                 return {
                     'success': True,
                     'response': response or "Hello! Which company would you like me to research?",
                     'data': None,
-                    'chart': None
+                    'chart': None,
+                    'user_analysis': self._get_user_analysis(session)
                 }
 
         except Exception as e:
@@ -259,24 +339,20 @@ Just tell me which one interests you, or mention any other company you'd like to
 
             prompt = f"{self.SYSTEM_PROMPT}\n\nUser message: \"{user_message}\"{context}\n\nRespond with ONLY valid JSON, no markdown formatting."
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
+            url_template = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            payload = {
+                'contents': [{
+                    'parts': [{'text': prompt}]
+                }],
+                'generationConfig': {
+                    'temperature': 0.7,
+                    'maxOutputTokens': 2048
+                }
+            }
             
-            response = requests.post(
-                url,
-                json={
-                    'contents': [{
-                        'parts': [{'text': prompt}]
-                    }],
-                    'generationConfig': {
-                        'temperature': 0.7,
-                        'maxOutputTokens': 2048
-                    }
-                },
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                data = response.json()
+            data = self._call_gemini_with_retry(url_template, payload)
+            
+            if data:
                 text = data['candidates'][0]['content']['parts'][0]['text']
                 
                 # Clean JSON
@@ -292,7 +368,6 @@ Just tell me which one interests you, or mention any other company you'd like to
                 parsed = json.loads(text)
                 return parsed
             
-            logger.error(f"Gemini API error: {response.status_code} - {response.text}")
             return None
 
         except Exception as e:
@@ -789,22 +864,20 @@ RESPOND IN VALID JSON ONLY:
 
 If NO significant conflicts exist, return: {{"has_conflict": false}}"""
 
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={self.gemini_key}",
-                json={
-                    'contents': [{
-                        'parts': [{'text': prompt}]
-                    }],
-                    'generationConfig': {
-                        'temperature': 0.1,
-                        'maxOutputTokens': 1000
-                    }
-                },
-                timeout=30
-            )
+            url_template = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key={api_key}"
+            payload = {
+                'contents': [{
+                    'parts': [{'text': prompt}]
+                }],
+                'generationConfig': {
+                    'temperature': 0.1,
+                    'maxOutputTokens': 1000
+                }
+            }
             
-            if response.status_code == 200:
-                result = response.json()
+            result = self._call_gemini_with_retry(url_template, payload)
+            
+            if result:
                 text = result['candidates'][0]['content']['parts'][0]['text']
                 
                 # Clean and parse JSON
@@ -990,22 +1063,19 @@ If NO significant conflicts exist, return: {{"has_conflict": false}}"""
             
             prompt = f"Synthesize the following information about {company} for the '{step}' section into a professional report format:\n\n{context}\n\nIMPORTANT INSTRUCTIONS:\n- {style_instruction}\n- Write ONLY the factual content - NO introductory phrases like 'Here is...', 'The following...', 'Based on...'\n- Start directly with the substantive information\n- Do not truncate or use ellipsis (...)\n- Use clear paragraphs and structure\n- Write in a professional, report-ready style"
 
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.gemini_key}",
-                json={
-                    'contents': [{
-                        'parts': [{'text': prompt}]
-                    }],
-                    'generationConfig': {
-                        'temperature': 0.7,
-                        'maxOutputTokens': 4096
-                    }
-                },
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                data = response.json()
+            url_template = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            payload = {
+                'contents': [{
+                    'parts': [{'text': prompt}]
+                }],
+                'generationConfig': {
+                    'temperature': 0.7,
+                    'maxOutputTokens': 4096
+                }
+            }
+            
+            data = self._call_gemini_with_retry(url_template, payload)
+            if data:
                 return data['candidates'][0]['content']['parts'][0]['text']
 
         except Exception as e:
@@ -1316,6 +1386,7 @@ If NO significant conflicts exist, return: {{"has_conflict": false}}"""
                 profile['type'] = user_analysis.get('type', 'normal')
                 profile['description'] = user_analysis.get('description', '')
                 profile['sentiment'] = user_analysis.get('sentiment', 'neutral')
+                logger.info(f"User persona detected: {profile['type']} - {profile['description']}")
             
             session['user_profile'] = profile
             self._save_session(session_id, session)
@@ -1347,19 +1418,19 @@ Analyze the user's behavior and respond with JSON:
     "confidence": 0.0-1.0
 }}"""
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.gemini_key}"
+            url_template = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+            payload = {
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {
+                    'temperature': 0.3,
+                    'maxOutputTokens': 200,
+                    'responseMimeType': 'application/json'
+                }
+            }
             
-            response = requests.post(
-                url,
-                json={
-                    'contents': [{'parts': [{'text': prompt}]}],
-                    'generationConfig': {'temperature': 0.3, 'maxOutputTokens': 500}
-                },
-                timeout=15
-            )
+            data = self._call_gemini_with_retry(url_template, payload)
             
-            if response.status_code == 200:
-                data = response.json()
+            if data:
                 
                 # Check if response has expected structure
                 if 'candidates' in data and len(data['candidates']) > 0:
@@ -1399,7 +1470,7 @@ Analyze the user's behavior and respond with JSON:
                 # If structure is unexpected, log and return default
                 logger.warning(f"Unexpected Gemini response structure: {data}")
             else:
-                logger.warning(f"Gemini API returned status {response.status_code}")
+                logger.warning("Gemini API call failed after retries")
             
             return {'type': 'normal', 'description': 'Standard user', 'sentiment': 'neutral', 'confidence': 1.0}
             
@@ -1419,6 +1490,20 @@ Analyze the user's behavior and respond with JSON:
             'edge_case': "Be helpful and understanding. Validate their input. Explain limitations clearly. Offer alternative solutions."
         }
         return instructions.get(user_type, "Maintain professional, helpful tone.")
+    
+    def _get_user_analysis(self, session: Dict) -> Optional[Dict]:
+        """Extract user analysis from session for response"""
+        user_profile = session.get('user_profile', {})
+        logger.debug(f"Getting user analysis from profile: {user_profile}")
+        if user_profile and user_profile.get('type'):
+            analysis = {
+                'type': user_profile.get('type'),
+                'description': user_profile.get('description', ''),
+                'sentiment': user_profile.get('sentiment', 'neutral')
+            }
+            logger.info(f"Returning user analysis: {analysis}")
+            return analysis
+        return None
     
     def _process_preferences(self, session_id: str, user_message: str, response: str) -> Dict[str, Any]:
         """Process user's research preferences"""
