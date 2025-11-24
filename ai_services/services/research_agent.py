@@ -31,6 +31,7 @@ Classify the message into ONE of the following intents:
 - provide_company
 - continue_research (includes: "next", "continue", "proceed", "next section", "go ahead")
 - deeper_analysis (includes: "deeper analysis", "deep search", "more details", "elaborate")
+- regenerate_section (includes: "regenerate", "redo", "refresh section")
 - regenerate_content (includes: "shorter", "longer", "brief", "concise", "summarize", "expand", "rewrite")
 - custom_research (includes: "latest news", "recent news", "current news", "news about", "updates on", "what's new with")
 - end_research (includes: "end research", "stop", "that's enough", "finish")
@@ -134,6 +135,10 @@ NEVER create research unless the intent is provide_company or continue_research 
             
             elif intent == 'continue_research' or intent == 'confirm':
                 return self._continue_research(session_id, response)
+            
+            elif intent == 'regenerate_section':
+                # Extract step name from user message
+                return self._regenerate_specific_section(session_id, user_message, response)
             
             elif intent == 'regenerate_content':
                 # Extract the modification request (shorter, longer, etc.)
@@ -772,6 +777,106 @@ If NO significant conflicts exist, return: {{"has_conflict": false}}"""
         except Exception as e:
             logger.error(f"Error analyzing conflicts: {e}")
             return None
+    
+    def _regenerate_specific_section(self, session_id: str, user_message: str, response: str) -> Dict[str, Any]:
+        """Regenerate a specific section based on user request"""
+        session = self._get_session(session_id)
+        company = session.get('current_company')
+        
+        if not company:
+            return {
+                'success': True,
+                'response': 'Please start a research first before regenerating sections.',
+                'data': None,
+                'chart': None
+            }
+        
+        # Extract step name from message (e.g., "regenerate overview", "regenerate financials for Apple")
+        step_keywords = {
+            'overview': ['overview', 'introduction', 'about'],
+            'financials': ['financial', 'financials', 'revenue', 'profit'],
+            'products': ['product', 'products', 'service', 'services'],
+            'competitors': ['competitor', 'competitors', 'competition'],
+            'pain_points': ['pain', 'pain_points', 'challenge', 'challenges'],
+            'opportunities': ['opportunit', 'opportunities', 'growth'],
+            'recommendations': ['recommend', 'recommendations', 'advice']
+        }
+        
+        detected_step = None
+        message_lower = user_message.lower()
+        
+        for step, keywords in step_keywords.items():
+            if any(keyword in message_lower for keyword in keywords):
+                detected_step = step
+                break
+        
+        if not detected_step:
+            return {
+                'success': True,
+                'response': 'Please specify which section you want to regenerate (overview, financials, products, etc.)',
+                'data': None,
+                'chart': None
+            }
+        
+        # Perform fresh research for this section
+        logger.info(f"Regenerating {detected_step} for {company}")
+        research_result = self._perform_research(company, detected_step)
+        
+        # Update session
+        session['research_data'][detected_step] = research_result
+        self._save_session(session_id, session)
+        
+        # Check for conflicts
+        conflict = research_result.get('conflict')
+        if conflict:
+            conflict_intro = f"🔍 I found some conflicting information while regenerating {detected_step}.\n\n"
+            
+            sources_text = ""
+            for source in conflict.get('sources', []):
+                source_type = " 📄 (Official Source)" if source.get('is_official') else ""
+                sources_text += f"• Source {source['source_id']}{source_type}: {source['display_text']}\n"
+                if source.get('context'):
+                    sources_text += f"  Context: {source['context']}\n"
+            
+            recommendation = f"\n💡 {conflict.get('recommendation', 'Please select the most reliable source.')}"
+            conflict_message = conflict_intro + sources_text + "\n" + conflict['question'] + recommendation
+            
+            session['pending_conflict'] = {
+                'step': detected_step,
+                'conflict': conflict,
+                'research_result': research_result
+            }
+            self._save_session(session_id, session)
+            
+            return {
+                'success': True,
+                'messages': [
+                    {'type': 'text', 'content': f"Regenerating {detected_step} section..."},
+                    {'type': 'text', 'content': conflict_message},
+                    {'type': 'conflict', 'data': conflict, 'step': detected_step}
+                ],
+                'step': detected_step,
+                'company': company
+            }
+        
+        step_names = {
+            'overview': 'Overview',
+            'financials': 'Financial Analysis',
+            'products': 'Products & Services',
+            'competitors': 'Competitive Analysis',
+            'pain_points': 'Pain Points',
+            'opportunities': 'Opportunities',
+            'recommendations': 'Strategic Recommendations'
+        }
+        
+        return {
+            'success': True,
+            'messages': [
+                {'type': 'research', 'step': detected_step, 'data': research_result.get('text'), 'chart': research_result.get('chart'), 'company': company}
+            ],
+            'step': detected_step,
+            'company': company
+        }
     
     def _extract_revenue_from_text(self, text: str) -> Optional[float]:
         """Extract revenue as a normalized number"""

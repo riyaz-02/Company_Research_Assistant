@@ -282,6 +282,11 @@
         renderSummary();
         
         function saveToSummary(step, data, company) {
+            // If company changes, clear previous research data
+            if (currentCompany && currentCompany !== company) {
+                researchSummary = [];
+            }
+            
             const summaryItem = {
                 company: company,
                 step: step,
@@ -289,7 +294,7 @@
                 timestamp: new Date().toISOString()
             };
             
-            // Update or add the summary item
+            // Update or add the summary item for current company only
             const existingIndex = researchSummary.findIndex(item => 
                 item.company === company && item.step === step
             );
@@ -307,7 +312,12 @@
         }
         
         function renderSummary() {
-            if (researchSummary.length === 0) {
+            // Filter to show only current company's research
+            const currentResearch = currentCompany 
+                ? researchSummary.filter(item => item.company === currentCompany)
+                : researchSummary;
+            
+            if (currentResearch.length === 0) {
                 summaryContent.innerHTML = '<p style="color: #9ca3af; text-align: center; margin-top: 40px;">No research data yet. Start by entering a company name!</p>';
                 return;
             }
@@ -324,13 +334,35 @@
             };
             
             let html = '';
-            researchSummary.forEach(item => {
+            currentResearch.forEach((item, index) => {
+                const actualIndex = researchSummary.findIndex(i => i === item);
                 const stepName = stepNames[item.step] || item.step;
                 const preview = item.data.substring(0, 150) + (item.data.length > 150 ? '...' : '');
                 html += `
-                    <div class="summary-item">
-                        <h4>${item.company} - ${stepName}</h4>
-                        <p>${escapeHtml(preview)}</p>
+                    <div class="summary-item" id="summary-item-${actualIndex}">
+                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                            <h4 style="margin: 0; flex: 1;">${item.company} - ${stepName}</h4>
+                            <div style="display: flex; gap: 8px;">
+                                <button onclick="editSection(${actualIndex})" style="padding: 4px 8px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;" title="Edit this section">
+                                    Edit
+                                </button>
+                                <button onclick="regenerateSection(${actualIndex})" style="padding: 4px 8px; background: #f59e0b; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;" title="Regenerate with AI">
+                                    Regenerate
+                                </button>
+                            </div>
+                        </div>
+                        <p id="summary-text-${actualIndex}" style="margin: 0;">${escapeHtml(preview)}</p>
+                        <div id="edit-form-${actualIndex}" style="display: none; margin-top: 10px;">
+                            <textarea id="edit-textarea-${actualIndex}" style="width: 100%; min-height: 150px; padding: 8px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; font-family: inherit; resize: vertical;">${escapeHtml(item.data)}</textarea>
+                            <div style="display: flex; gap: 8px; margin-top: 8px;">
+                                <button onclick="saveEdit(${actualIndex})" style="padding: 6px 12px; background: #10b981; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                                    Save
+                                </button>
+                                <button onclick="cancelEdit(${actualIndex})" style="padding: 6px 12px; background: #6b7280; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 `;
             });
@@ -597,6 +629,94 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+        
+        function editSection(index) {
+            // Hide text, show edit form
+            document.getElementById(`summary-text-${index}`).style.display = 'none';
+            document.getElementById(`edit-form-${index}`).style.display = 'block';
+        }
+        
+        function cancelEdit(index) {
+            // Show text, hide edit form
+            document.getElementById(`summary-text-${index}`).style.display = 'block';
+            document.getElementById(`edit-form-${index}`).style.display = 'none';
+        }
+        
+        function saveEdit(index) {
+            const newText = document.getElementById(`edit-textarea-${index}`).value;
+            
+            // Update the summary data
+            researchSummary[index].data = newText;
+            localStorage.setItem('research_summary', JSON.stringify(researchSummary));
+            
+            // Update the preview text
+            const preview = newText.substring(0, 150) + (newText.length > 150 ? '...' : '');
+            document.getElementById(`summary-text-${index}`).innerHTML = escapeHtml(preview);
+            
+            // Hide edit form, show text
+            cancelEdit(index);
+            
+            // Show success message in chat
+            addAssistantMessage(`✓ Successfully updated ${researchSummary[index].company} - ${researchSummary[index].step} section.`);
+        }
+        
+        async function regenerateSection(index) {
+            const item = researchSummary[index];
+            const stepNames = {
+                'overview': 'Overview',
+                'financials': 'Financials',
+                'products': 'Products & Services',
+                'competitors': 'Competitors',
+                'pain_points': 'Pain Points',
+                'opportunities': 'Opportunities',
+                'recommendations': 'Recommendations',
+                'custom': 'Custom Research'
+            };
+            const stepName = stepNames[item.step] || item.step;
+            
+            // Ask user to confirm
+            const confirmed = confirm(`Regenerate ${item.company} - ${stepName} section with fresh AI research?`);
+            if (!confirmed) return;
+            
+            // Send message to regenerate
+            addAssistantMessage(`Regenerating ${stepName} section for ${item.company}...`);
+            showThinking();
+            
+            try {
+                const response = await fetch('/api/agent/message', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+                    },
+                    body: JSON.stringify({
+                        message: `regenerate ${item.step} for ${item.company}`,
+                        session_id: sessionId
+                    })
+                });
+
+                const data = await response.json();
+                removeThinking();
+
+                if (data.success && data.messages) {
+                    data.messages.forEach((msg, msgIndex) => {
+                        setTimeout(() => {
+                            if (msg.type === 'text') {
+                                addAssistantMessage(msg.content);
+                            } else if (msg.type === 'research') {
+                                addResearchData(msg.step, msg.data, msg.company, msg.chart);
+                            }
+                        }, msgIndex * 300);
+                    });
+                } else {
+                    addAssistantMessage('Successfully regenerated the section!');
+                }
+            } catch (error) {
+                removeThinking();
+                console.error('Error:', error);
+                addAssistantMessage('Sorry, I encountered an error while regenerating. Please try again.');
+            }
         }
 
         async function sendMessage() {
