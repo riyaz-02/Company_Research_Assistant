@@ -1,24 +1,379 @@
 # Company Research Assistant
 
-A full-stack Laravel + MongoDB AI agent that researches companies through web search and generates structured account plans via natural conversation.
+An intelligent AI-powered research assistant that helps you research any company through natural conversation. Built with Laravel frontend and Python FastAPI backend, featuring adaptive user persona detection, conflict resolution, voice input, and multi-API key rotation for reliability.
 
 ## Project Information
 
 - **Project Name**: Company Research Assistant
-- **Author**: SkRiyaz
+- **Author**: Sk Riyaz
+- **Institution**: JIS College of Engineering
 - **Company**: EightFold AI
 - **Purpose**: Recruitment Assignment
 
-## Features
+## 🌟 Key Features
 
-- 🤖 **AI-Powered Agent**: Natural conversational interface with LLM integration
-- 🔍 **Web Search Integration**: Research companies using SerpAPI or Bing Search API
-- 📊 **Account Plan Generation**: Multi-section account plans (overview, products, competitors, opportunities, recommendations, etc.) 
-- 💬 **Session Memory**: Maintains conversation history using MongoDB
-- ✏️ **Interactive Editing**: Edit and regenerate specific plan sections
-- 📱 **Modern UI**: Split-screen chat interface with live-updating account plan panel
+- 🤖 **Conversational AI Agent**: Natural language understanding with adaptive responses
+- 👥 **User Persona Detection**: Automatically adapts to Confused, Efficient, Chatty, or Edge-case users
+- 🔍 **Intelligent Web Search**: Real-time company research using SerpAPI with 10+ sources per query
+- ⚔️ **Conflict Detection**: Identifies and resolves conflicting data from multiple sources
+- 🎤 **Voice Input**: Hands-free research with Web Speech API and auto-send on silence
+- 🔄 **Multi-API Rotation**: 3 backup Gemini API keys with automatic failover for concurrent users
+- 📊 **Dynamic Research Workflow**: 7-step structured research (Overview, Financials, Products, Competitors, Pain Points, Opportunities, Recommendations)
+- 📄 **PDF Report Generation**: Professional PDF export of complete research
+- 💾 **Session Memory**: Maintains conversation context and research data
+- 🎨 **Modern Glassmorphism UI**: Dark gradient design with professional aesthetics
 
-## Conversational Intelligence & Design Philosophy
+## 🏗️ Architecture Overview
+
+### System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Browser (User)                        │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+│  │ Chat UI     │  │ Voice Input  │  │ PDF Download     │   │
+│  │ (Blade)     │  │ (Web Speech) │  │ (Glassmorphism)  │   │
+│  └─────────────┘  └──────────────┘  └──────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                    HTTP/AJAX Requests
+                            │
+┌─────────────────────────────────────────────────────────────┐
+│              Laravel Frontend (Port 8000)                    │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  Routes (web.php)                                    │   │
+│  │  • GET  /            → Agent Chat Interface          │   │
+│  │  • POST /agent/chat  → Proxy to FastAPI             │   │
+│  │  • GET  /download    → PDF Download                  │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  Views (Blade Templates)                             │   │
+│  │  • agent/index.blade.php (1576 lines)               │   │
+│  │    - Chat interface with glassmorphism design        │   │
+│  │    - Voice recognition (Web Speech API)              │   │
+│  │    - Persona badge display                           │   │
+│  │    - Conflict resolution UI                          │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                    HTTP POST to /message
+                            │
+┌─────────────────────────────────────────────────────────────┐
+│          Python FastAPI Backend (Port 8001)                  │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  app.py (FastAPI Server)                             │   │
+│  │  • POST /message    → Handle user messages           │   │
+│  │  • POST /feedback   → Session feedback (optional)    │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  services/research_agent.py (1615 lines)             │   │
+│  │  ┌─────────────────────────────────────────────┐    │   │
+│  │  │ ResearchAgent Class                          │    │   │
+│  │  │ • Intent Classification                      │    │   │
+│  │  │ • User Persona Detection (4 types)          │    │   │
+│  │  │ • Research Workflow (7 steps)                │    │   │
+│  │  │ • Conflict Detection & Resolution            │    │   │
+│  │  │ • Multi-API Key Rotation                     │    │   │
+│  │  │ • Session Management (in-memory)             │    │   │
+│  │  └─────────────────────────────────────────────┘    │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  services/pdf_generator.py                           │   │
+│  │  • PDF creation with Plotly charts                   │   │
+│  │  • Professional formatting                           │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+           │                    │                   │
+    ┌──────┴──────┐      ┌─────┴──────┐     ┌─────┴──────┐
+    │   Gemini    │      │  SerpAPI   │     │   Local    │
+    │   API       │      │  (Google   │     │   Storage  │
+    │  (3 keys)   │      │   Search)  │     │   (PDFs)   │
+    └─────────────┘      └────────────┘     └────────────┘
+```
+
+### Data Flow
+
+1. **User Input** → Browser (text or voice)
+2. **Frontend Processing** → Laravel receives input, forwards to FastAPI
+3. **Intent Classification** → Gemini 2.5 Flash analyzes user intent
+4. **Persona Detection** → Gemini 1.5 Flash classifies user behavior (after 2+ messages)
+5. **Research Execution** → SerpAPI fetches 10 search results
+6. **Content Synthesis** → Gemini 2.5 Flash summarizes research
+7. **Conflict Detection** → Gemini 2.0 Flash checks for data inconsistencies
+8. **Response Generation** → FastAPI returns structured response
+9. **UI Update** → Laravel Blade renders chat messages, charts, conflicts
+10. **PDF Export** → Python generates PDF from research data
+
+## 🧠 Core Components
+
+### 1. ResearchAgent (Python)
+
+**File:** `ai_services/services/research_agent.py`
+
+**Key Methods:**
+- `handle_message(session_id, user_message)` - Main entry point
+- `_call_gemini(user_message, session)` - Intent classification
+- `_perform_research(company, step)` - Execute research step
+- `_detect_conflicts_in_results(company, step, results)` - Find data conflicts
+- `_analyze_user_type(conversation_history)` - Persona detection
+- `_call_gemini_with_retry(url, payload, max_retries)` - API rotation logic
+
+**Research Steps:**
+1. Overview (company info, headquarters, founding)
+2. Financials (revenue, profit, funding)
+3. Products & Services (offerings, key products)
+4. Competitors (competitive landscape)
+5. Pain Points (challenges, problems)
+6. Opportunities (growth areas, market expansion)
+7. Recommendations (strategic advice)
+
+### 2. Multi-API Key Rotation
+
+**Implementation:** Lines 94-190 in `research_agent.py`
+
+**How It Works:**
+```python
+# 3 API keys loaded (primary + 2 backups)
+self.gemini_keys = [key1, key2, key3]
+self.current_key_index = 0
+
+# On API failure (429, 401, 403):
+def _rotate_api_key(failed_key):
+    self.current_key_index = (self.current_key_index + 1) % len(self.gemini_keys)
+    # Retry with next key
+
+# Automatic retry with all keys:
+def _call_gemini_with_retry(url, payload, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload)
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 429:
+                _rotate_api_key()  # Try next key
+                continue
+```
+
+**Benefits:**
+- Supports concurrent users without rate limit errors
+- Automatic failover on API errors
+- No downtime when one key expires
+
+### 3. User Persona Detection
+
+**Implementation:** Lines 1383-1475 in `research_agent.py`
+
+**How It Works:**
+1. User sends 2+ messages
+2. Gemini 1.5 Flash analyzes conversation history
+3. Classifies user into 4 personas:
+   - **Confused**: Asks many questions, unsure, needs guidance
+   - **Efficient**: Short responses, wants quick results
+   - **Chatty**: Conversational, adds extra context
+   - **Edge-case**: Off-topic inputs, invalid requests
+4. System adapts responses based on persona
+
+**Example Prompts:**
+- Confused → "I'd be happy to help! Here are some popular companies you can research..."
+- Efficient → "Starting research on Apple..."
+- Chatty → "Great question! Let me research that for you..."
+
+### 4. Conflict Detection
+
+**Implementation:** Lines 808-903 in `research_agent.py`
+
+**How It Works:**
+1. Fetch 10 search results from SerpAPI
+2. Extract key data (revenue, employees, headquarters)
+3. Gemini 2.0 Flash analyzes for conflicts
+4. If found, presents user with options:
+   - Source 1 (Official): ₹43,279 Cr
+   - Source 2 (News): $5.2 Billion
+5. User selects preferred source
+6. System uses chosen value in final report
+
+**Detection Criteria:**
+- Financial data differs by >5%
+- Company facts contradict (HQ location, founding year)
+- Product counts mismatch
+- Employee numbers conflict
+
+### 5. Voice Input
+
+**Implementation:** Lines 735-855 in `agent/index.blade.php`
+
+**How It Works:**
+1. Uses Web Speech API (browser native)
+2. Continuous listening mode
+3. Detects 2-second silence → auto-send
+4. Error handling for:
+   - No microphone permission
+   - Network issues (API requires internet)
+   - Rate limits
+5. Visual feedback: microphone ↔ stop icon
+
+**Code Snippet:**
+```javascript
+recognition.continuous = true;
+recognition.interimResults = true;
+
+recognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    // Detect 2s silence
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+        sendMessage(transcript);
+    }, 2000);
+};
+```
+
+### 6. PDF Generation
+
+**Implementation:** `ai_services/services/pdf_generator.py`
+
+**Features:**
+- Professional formatting with headers/footers
+- Embedded Plotly charts (financial trends, competitor analysis)
+- Timestamped filenames
+- Stored in `storage/reports/`
+
+**Report Sections:**
+- Cover page with company name
+- Executive summary
+- All research sections with charts
+- Source citations
+- Generation timestamp
+
+## 🎨 Design Decisions & Rationale
+
+### 1. Why Laravel + FastAPI Architecture?
+
+**Decision:** Separate frontend (Laravel) and backend (FastAPI)
+
+**Rationale:**
+- **Laravel**: Excellent for UI, routing, Blade templating - rapid frontend development
+- **FastAPI**: Python ecosystem for AI (Gemini SDK, Plotly, NLP libraries)
+- **Separation of Concerns**: Frontend handles presentation, backend handles intelligence
+- **Scalability**: Can deploy frontend and backend independently
+- **Technology Fit**: Use best tool for each job
+
+**Trade-offs:**
+- ✅ Pro: Better performance (Python for heavy AI processing)
+- ✅ Pro: Cleaner codebase (no mixing PHP AI logic)
+- ❌ Con: Two servers to manage (but worth it for production)
+
+### 2. Why Multi-API Key Rotation?
+
+**Decision:** Implement automatic API key rotation with 3 keys
+
+**Rationale:**
+- **Concurrent Users**: Gemini free tier has rate limits (60 requests/min)
+- **Reliability**: If one key fails/expires, system continues working
+- **Assignment Requirement**: Need to handle "multiple user personas" → implies concurrent usage
+- **Real-world Simulation**: Production systems use key rotation
+
+**Implementation Complexity:** Medium (190 lines of code)
+
+**Impact:** High - enables true multi-user support
+
+### 3. Why In-Memory Sessions (Not Database)?
+
+**Decision:** Store sessions in Python dictionary, not MongoDB/Redis
+
+**Rationale:**
+- **Assignment Scope**: Demo/prototype, not production deployment
+- **Simplicity**: No database setup required for evaluators
+- **Speed**: Instant session access (no DB queries)
+- **Sufficient**: For single-instance demo with <100 concurrent users
+
+**Trade-offs:**
+- ✅ Pro: Faster development, easier setup
+- ❌ Con: Sessions lost on server restart (acceptable for demo)
+- ❌ Con: Not scalable to multiple server instances (not required)
+
+**Production Path:** Easy to swap in Redis/MongoDB later (same interface)
+
+### 4. Why Gemini Over OpenAI?
+
+**Decision:** Use Google Gemini API (1.5/2.0/2.5 Flash models)
+
+**Rationale:**
+- **Cost**: Gemini Flash is significantly cheaper than GPT-4
+- **Speed**: Flash models are optimized for low latency (< 2s response)
+- **JSON Mode**: Native JSON output support (critical for structured responses)
+- **Quota**: More generous free tier for development
+- **Quality**: Gemini 2.5 Flash rivals GPT-4 for structured tasks
+
+**Model Selection:**
+- **Gemini 2.5 Flash**: Intent classification, research synthesis (complex reasoning)
+- **Gemini 1.5 Flash**: Persona detection (lighter task)
+- **Gemini 2.0 Flash Exp**: Conflict detection (experimental features)
+
+### 5. Why Persona Detection?
+
+**Decision:** Implement AI-powered user behavior classification
+
+**Rationale:**
+- **Assignment Criteria**: "Handle multiple user personas" explicitly required
+- **UX Excellence**: Best chatbots adapt to user communication style
+- **Real-world Value**: Customer support, tutoring systems use this
+- **Demonstration of Intelligence**: Shows understanding beyond keywords
+
+**Personas Chosen:**
+1. **Confused** - Common in onboarding, needs extra help
+2. **Efficient** - Power users, wants speed
+3. **Chatty** - Builds rapport, common in conversational AI
+4. **Edge-case** - Tests robustness
+
+**Why Not Rules-Based?** AI classification is more accurate and adapts to subtle cues
+
+### 6. Why Conflict Detection?
+
+**Decision:** Implement intelligent source verification with user choice
+
+**Rationale:**
+- **Data Accuracy**: Critical for business research (wrong revenue = bad decision)
+- **Agentic Behavior**: Demonstrates autonomous problem-solving (finds issues without being told)
+- **Trust Building**: Users see system is careful, not blindly copying
+- **Differentiation**: Most chatbots just pick first result
+
+**Implementation:**
+- Fetch 10 sources (not just 3)
+- Use AI to detect >5% numerical differences
+- Prioritize official sources (annual reports, SEC filings)
+- Let user make final call (human-in-the-loop)
+
+### 7. Why Voice Input?
+
+**Decision:** Add Web Speech API with auto-send on 2s silence
+
+**Rationale:**
+- **Accessibility**: Helps users with typing difficulties
+- **UX Innovation**: Hands-free research while multitasking
+- **Natural Interaction**: Feels more like talking to assistant
+- **Low Implementation Cost**: Native browser API (no server processing)
+
+**Why 2-Second Silence?** Balance between:
+- Too short (< 1s) → Sends incomplete sentences
+- Too long (> 3s) → Feels laggy
+
+### 8. Why Glassmorphism UI?
+
+**Decision:** Dark gradient background with frosted glass effect
+
+**Rationale:**
+- **Modern Aesthetic**: Professional, matches 2024/2025 design trends
+- **Readability**: Dark theme reduces eye strain during long research sessions
+- **Visual Hierarchy**: Glassmorphism creates depth (chat vs. background)
+- **Brand Perception**: Looks like premium AI product (OpenAI, Anthropic style)
+
+**Implementation:**
+- Gradient: `#000000` to `#0f172a` (deep black to slate)
+- Blur: 20px backdrop filter
+- Transparency: 10% background alpha
+- Shadows: Subtle glows for depth
+
+## 💬 Conversational Intelligence
 
 This project prioritizes **conversational quality over rigid functionality**, aligning with the evaluation criteria for natural, human-like AI interaction.
 
@@ -145,112 +500,323 @@ To prevent user confusion and accidental clicks:
 
 ✅ **Intelligence & Adaptability**: Handles multiple user personas, graceful error handling, context-aware responses
 
-## Requirements- PHP >= 8.2
+## 📋 Requirements
+
+### Backend (Python FastAPI)
+- Python >= 3.8
+- FastAPI
+- Uvicorn (ASGI server)
+- Google Generative AI (Gemini API)
+- SerpAPI (for web search)
+- Plotly (for charts)
+- Loguru (for logging)
+- Python-dotenv
+
+### Frontend (Laravel)
+- PHP >= 8.2
 - Composer
-- Node.js and NPM
-- MongoDB (Atlas or local instance)
-- LLM API Key (OpenAI, Anthropic, or custom endpoint)
-- Search API Key (SerpAPI or Bing Search API)
+- Node.js >= 16 and NPM
+- Laravel 11.x
 
-## Installation
+### APIs Required
+- **Gemini API Keys**: 3-4 keys recommended (for rotation)
+- **SerpAPI Key**: For Google search integration
 
-1. Clone the repository
-2. Install PHP dependencies:
+## 🚀 Installation & Setup
+
+### Step 1: Clone Repository
+```bash
+git clone https://github.com/riyaz-02/Company_Research_Assistant.git
+cd Company_Research_Assistant
+```
+
+### Step 2: Backend Setup (Python FastAPI)
+
+1. **Navigate to AI services directory:**
+   ```bash
+   cd ai_services
+   ```
+
+2. **Create virtual environment:**
+   ```bash
+   python -m venv venv
+   ```
+
+3. **Activate virtual environment:**
+   - Windows (PowerShell):
+     ```powershell
+     .\venv\Scripts\Activate.ps1
+     ```
+   - Windows (CMD):
+     ```cmd
+     venv\Scripts\activate.bat
+     ```
+   - Linux/Mac:
+     ```bash
+     source venv/bin/activate
+     ```
+
+4. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+5. **Create `.env` file in `ai_services/` directory:**
+   ```env
+   # Primary Gemini API Key
+   GEMINI_API_KEY=your_primary_gemini_api_key_here
+   
+   # Additional API Keys for Rotation (comma-separated)
+   GEMINI_API_KEYS=key2,key3,key4
+   
+   # SerpAPI Key
+   SERPAPI_API_KEY=your_serpapi_key_here
+   ```
+
+6. **Run the FastAPI server:**
+   ```bash
+   uvicorn app:app --reload --host 0.0.0.0 --port 8001
+   ```
+   
+   The backend API will be available at `http://localhost:8001`
+
+### Step 3: Frontend Setup (Laravel)
+
+1. **Navigate back to root directory:**
+   ```bash
+   cd ..
+   ```
+
+2. **Install PHP dependencies:**
    ```bash
    composer install
    ```
-3. Copy environment file:
+
+3. **Create `.env` file:**
    ```bash
    cp .env.example .env
    ```
-4. Generate application key:
+
+4. **Generate application key:**
    ```bash
    php artisan key:generate
    ```
-5. Configure MongoDB in `.env`:
-   ```
-   DB_CONNECTION=mongodb
-   MONGODB_URI=your_mongodb_connection_string
-   MONGODB_DATABASE=company_research_assistant
-   ```
-6. Configure LLM API in `.env` (choose one):
-   ```
-   # For Gemini (already configured)
-   LLM_PROVIDER=gemini
-   LLM_API_KEY=your_gemini_api_key
-   LLM_MODEL=gemini-1.5-pro
+
+5. **Configure `.env` for Laravel:**
+   ```env
+   APP_NAME="Company Research Assistant"
+   APP_ENV=local
+   APP_DEBUG=true
+   APP_URL=http://localhost:8000
    
-   # OR for OpenAI
-   LLM_PROVIDER=openai
-   LLM_API_KEY=your_openai_api_key
-   LLM_MODEL=gpt-4o-mini
-   
-   # OR for Anthropic
-   LLM_PROVIDER=anthropic
-   LLM_API_KEY=your_anthropic_api_key
-   LLM_MODEL=claude-3-5-sonnet-20241022
+   # AI Service URL (Python FastAPI)
+   AI_SERVICE_URL=http://localhost:8001
    ```
-7. Configure Search API in `.env` (at least one):
-   ```
-   SERPAPI_KEY=your_serpapi_key
-   # OR
-   BING_API_KEY=your_bing_api_key
-   ```
-8. Install Node dependencies:
+
+6. **Install Node dependencies:**
    ```bash
    npm install
    ```
-9. Build frontend assets:
+
+7. **Build frontend assets:**
    ```bash
    npm run build
    ```
+   
+   For development with hot reload:
+   ```bash
+   npm run dev
+   ```
 
-## Development
+8. **Run Laravel development server:**
+   ```bash
+   php artisan serve
+   ```
+   
+   The application will be available at `http://localhost:8000`
 
-Run the development server:
-```bash
-php artisan serve
-```
+### Step 4: Access Application
 
-Then visit `http://localhost:8000` in your browser.
+1. **Ensure both servers are running:**
+   - Backend (FastAPI): `http://localhost:8001`
+   - Frontend (Laravel): `http://localhost:8000`
 
-## API Endpoints
+2. **Open browser and navigate to:**
+   ```
+   http://localhost:8000
+   ```
 
-- `POST /api/agent/message` - Send message to AI agent
-- `GET /api/agent/plan` - Get current account plan
-- `POST /api/agent/plan/section` - Update a plan section
-- `POST /api/agent/plan/regenerate` - Regenerate a plan section
-- `GET /api/agent/history` - Get conversation history
-- `DELETE /api/agent/history` - Clear conversation history
+3. **Start researching!** Type a company name or say "help" to get started.
 
-## Architecture
+## 🧪 Testing the Application
 
-### Backend Services
+### Test Scenarios
 
-- **AgentService**: Main agent loop with LLM integration and action execution
-- **ResearchService**: Web search integration (SerpAPI/Bing)
-- **PlanService**: MongoDB CRUD operations for account plans
-- **MemoryService**: Conversation history management
+1. **Confused User Persona:**
+   - Type: "I need help"
+   - Type: "I'm not sure what to research"
+   - System should provide patient guidance and suggestions
 
-### MongoDB Collections
+2. **Efficient User Persona:**
+   - Type: "Apple"
+   - Type: "next" or "continue"
+   - System should respond concisely without extra explanations
 
-- `account_plans`: Stores account plan data
-- `conversations`: Stores conversation history
-- `search_cache`: Caches search results (optional)
+3. **Voice Input:**
+   - Click the microphone icon
+   - Say: "Research Tesla"
+   - System should transcribe and process automatically
 
-### Agent Actions
+4. **Conflict Detection:**
+   - Research a company with multiple data sources
+   - System should detect conflicting information and ask for user preference
 
-The AI agent uses a JSON action format:
-- `search`: Perform web search
-- `fetch`: Fetch article text (optional)
-- `update_plan`: Update a plan section
-- `ask_user`: Ask for clarification
-- `finish`: Return final response
+5. **PDF Generation:**
+   - Complete full research workflow
+   - System should offer PDF export at the end
 
-## Framework
+## 🔧 API Endpoints
 
-This project is built using [Laravel](https://laravel.com) framework with MongoDB integration via [mongodb/laravel-mongodb](https://github.com/mongodb/laravel-mongodb).
+### Frontend (Laravel)
+- `GET /` - Main chat interface
+- `POST /agent/chat` - Proxy to FastAPI backend
+- `GET /download/{filename}` - Download generated PDF reports
 
-## License
+### Backend (FastAPI)
+- `POST /message` - Handle user messages and research requests
+  - Request: `{ "session_id": "uuid", "message": "user text" }`
+  - Response: `{ "success": bool, "response": "text", "data": object, "user_analysis": object }`
+- `POST /feedback` - Optional session feedback endpoint
 
-This project is created as part of a recruitment assignment for EightFold AI.
+## 🛠️ Technologies Used
+
+### Frontend Stack
+- **Laravel 11** - PHP web framework
+- **Blade Templates** - Server-side templating
+- **Vite** - Frontend build tool
+- **Tailwind CSS** - Utility-first CSS framework
+- **Web Speech API** - Voice input (browser native)
+
+### Backend Stack
+- **Python 3.8+** - Programming language
+- **FastAPI** - Modern async web framework
+- **Uvicorn** - ASGI server
+- **Google Generative AI** - Gemini API SDK
+- **SerpAPI** - Google search integration
+- **Plotly** - Interactive chart generation
+- **BeautifulSoup4** - HTML parsing for web scraping
+- **Loguru** - Advanced logging
+
+### AI Models
+- **Gemini 2.5 Flash** - Intent classification, research synthesis
+- **Gemini 1.5 Flash** - User persona detection
+- **Gemini 2.0 Flash Exp** - Conflict detection
+
+## 📊 Project Statistics
+
+- **Total Lines of Code**: ~3,500+ lines
+  - Backend (Python): ~1,800 lines
+  - Frontend (Blade/JS): ~1,700 lines
+- **Key Files**:
+  - `research_agent.py`: 1,615 lines
+  - `agent/index.blade.php`: 1,576 lines
+  - `app.py`: 145 lines
+- **API Integration**: 3 services (Gemini, SerpAPI, Web Speech)
+- **Research Sources**: 10 per query
+- **Supported Personas**: 4 types
+
+## 🎯 Assignment Evaluation Criteria Coverage
+
+### ✅ Conversational Quality (25%)
+- Natural language understanding with multiple intent variations
+- Context-aware responses based on conversation history
+- Graceful fallback handling for unclear inputs
+- Human-like interaction patterns
+
+### ✅ Agentic Behaviour (25%)
+- Autonomous research workflow (7 steps)
+- Self-directed conflict detection and resolution
+- Proactive suggestions based on user persona
+- Goal-oriented task completion
+
+### ✅ Technical Implementation (25%)
+- Clean architecture (separation of concerns)
+- Multi-API key rotation for reliability
+- Session management with in-memory storage
+- Professional PDF generation with charts
+- Voice input integration
+- Real-time web search with source verification
+
+### ✅ Intelligence & Adaptability (25%)
+- AI-powered persona detection (4 types)
+- Adaptive response generation per user type
+- Conflict detection with source prioritization
+- Context tracking across conversation
+
+## 📝 Known Limitations
+
+1. **Session Persistence**: Sessions stored in memory (lost on server restart)
+   - **Why**: Simplified demo setup without database dependency
+   - **Fix**: Add Redis/MongoDB for production
+
+2. **Persona Badge UI**: Backend persona detection works, but badge visibility has CSS issues
+   - **Status**: Backend returns correct persona data
+   - **Issue**: Frontend element not displaying (z-index or positioning)
+
+3. **Voice Input Requires Internet**: Web Speech API is cloud-based
+   - **Limitation**: Browser API design
+   - **Workaround**: Clear error message to user
+
+4. **PDF Storage**: Local file system (not cloud)
+   - **Why**: Simplified for demo
+   - **Production**: Use AWS S3 or similar
+
+5. **Search API Dependency**: Requires SerpAPI subscription
+   - **Cost**: ~$50/month for production
+   - **Alternative**: Bing Search API or web scraping
+
+## 🚧 Future Enhancements
+
+- [ ] **Database Integration**: PostgreSQL/MongoDB for session persistence
+- [ ] **User Authentication**: Login system for saved research history
+- [ ] **Email Reports**: Send PDF reports via email
+- [ ] **Comparison Mode**: Compare multiple companies side-by-side
+- [ ] **Export Formats**: Excel, CSV, PowerPoint in addition to PDF
+- [ ] **Advanced Charts**: Interactive Plotly charts in web UI
+- [ ] **Webhook Integration**: Connect to CRM systems (Salesforce, HubSpot)
+- [ ] **Multi-language Support**: Research companies in different languages
+- [ ] **Voice Output**: TTS (Text-to-Speech) for responses
+- [ ] **Mobile App**: React Native or Flutter mobile version
+
+## 📚 Documentation
+
+- **Setup Guide**: See "Installation & Setup" section above
+- **User Guide**: `USER_PROFILING_GUIDE.md` (persona handling details)
+- **API Documentation**: `CREDENTIALS.md` (API setup instructions)
+- **Architecture Diagram**: See "Architecture Overview" section
+
+## 🤝 Contributing
+
+This project is part of a recruitment assignment for EightFold AI. Contributions are not currently accepted, but feel free to fork and adapt for your own use.
+
+## 📄 License
+
+This project is created as part of a recruitment assignment. All rights reserved.
+
+## 👤 Author
+
+**Sk Riyaz**
+- Institution: JIS College of Engineering
+- GitHub: [@riyaz-02](https://github.com/riyaz-02)
+- Project: Company Research Assistant for EightFold AI
+
+## 🙏 Acknowledgments
+
+- **EightFold AI** - For the recruitment opportunity and project requirements
+- **Google Gemini** - For powerful and affordable AI models
+- **SerpAPI** - For reliable search API
+- **Laravel & FastAPI Communities** - For excellent documentation
+
+---
+
+**Built with ❤️ for intelligent company research**
